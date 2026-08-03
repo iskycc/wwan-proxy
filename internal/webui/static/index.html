@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>WWAN Control</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="network-progress" id="network-progress"><span></span></div>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <section class="auth-screen" id="auth-screen">
+    <div class="auth-visual">
+      <div class="auth-rings"><div class="auth-logo">W</div><i></i><i></i><i></i></div>
+      <p>SECURE NETWORK CONTROL</p>
+      <h1>你的网络，<br><em>只属于你。</em></h1>
+      <span>本地优先的多出口代理控制中心</span>
+    </div>
+    <div class="auth-panel glass-card">
+      <div class="auth-brand"><div class="brand-mark">W</div><div><strong>WWAN Control</strong><span id="auth-kicker">正在检查安全状态…</span></div></div>
+      <div class="auth-loading" id="auth-loading"><i></i><span>正在连接本地数据库</span></div>
+      <form id="auth-form" class="auth-form hidden">
+        <p class="eyebrow" id="auth-eyebrow">FIRST-RUN SETUP</p>
+        <h2 id="auth-title">创建管理员账户</h2>
+        <p class="auth-copy" id="auth-copy">这是第一次访问。创建的账户将用于保护配置、状态和历史日志。</p>
+        <label>管理员用户名<div class="input-shell"><span>⌘</span><input autocomplete="username" required name="username" placeholder="至少 3 个字符"></div></label>
+        <label>管理员密码<div class="input-shell"><span>●</span><input autocomplete="new-password" required type="password" name="password" placeholder="至少 12 个字符"></div></label>
+        <div class="init-only" id="password-strength"><div class="strength-head"><span>密码强度</span><b>尚未输入</b></div><div class="progress-track"><i></i></div></div>
+        <label class="init-only">确认密码<div class="input-shell"><span>●</span><input autocomplete="new-password" type="password" name="confirm_password" placeholder="再次输入密码"></div></label>
+        <div class="auth-error" id="auth-error"></div>
+        <button class="primary-button auth-submit" type="submit"><span id="auth-submit-text">初始化并进入控制台</span><i class="button-spinner"></i></button>
+        <small class="auth-note">密码仅以 bcrypt 哈希保存在本地 SQLite 中。</small>
+      </form>
+    </div>
+  </section>
+  <div class="shell app-shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">W<i></i></div><div><strong>WWAN</strong><span>Control Center</span></div></div>
+      <nav>
+        <button class="nav-item active" data-page="overview"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm10 7h6v-9h-6zM4 20h6v-3H4zm10-13h6V4h-6z"/></svg></span><span class="nav-label">总览</span></button>
+        <button class="nav-item" data-page="configuration"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.94 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.57 15 1.7 1.7 0 0 0 3 14H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.57 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15.06 4.6a1.7 1.7 0 0 0 1.88-.34L17 4.2 19.83 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg></span><span class="nav-label">配置</span></button>
+        <button class="nav-item" data-page="performance"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 18V9m5 9V5m6 13v-6m5 6V3"/></svg></span><span class="nav-label">性能</span></button>
+        <button class="nav-item" data-page="logs"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M7 6h13M7 12h13M7 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></span><span class="nav-label">日志</span></button>
+        <button class="nav-item" data-page="settings"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6M6 14v6"/></svg></span><span class="nav-label">设置</span></button>
+      </nav>
+      <div class="sidebar-footer"><span class="live-dot"></span><div><strong>管理服务在线</strong><span id="side-uptime">运行中</span></div></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow" id="page-eyebrow">NETWORK OVERVIEW</p><h1 id="page-title">连接，一目了然。</h1></div>
+        <div class="top-actions"><span class="last-update" id="last-update">正在同步…</span><button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11m16 2-2.4 4.6A7 7 0 0 1 5.8 15"/></svg></button><button class="primary-button" id="add-button"><span>＋</span> 新建出口</button><div class="account-menu"><button class="account-button" id="account-button"><span id="account-avatar">A</span><b id="account-name">Admin</b><i>⌄</i></button><div class="account-dropdown" id="account-dropdown"><div><span>已安全登录</span><strong id="account-detail">Admin</strong></div><button id="logout-button">退出登录 <span>⇥</span></button></div></div></div>
+      </header>
+
+      <section class="page active" id="page-overview">
+        <div class="hero glass-card">
+          <div class="hero-copy"><span class="hero-label" id="hero-status"><i></i><b>SYSTEM OPERATIONAL</b></span><h2>每一条链路，<br><em>都在掌控之中。</em></h2><p>TCP、UDP、DNS 与 DoH 流量严格绑定指定 WWAN 出口，状态按每个实例的心跳策略自动验证。</p><div class="hero-chips"><span>SO_BINDTODEVICE</span><span>独立健康检测</span><span>SQLite 持久化</span></div></div>
+          <div class="network-viz" aria-label="健康出口拓扑"><div class="viz-halo halo-one"></div><div class="viz-halo halo-two"></div><i class="viz-node node-a"></i><i class="viz-node node-b"></i><i class="viz-node node-c"></i><i class="viz-node node-d"></i><div class="viz-core"><span id="hero-healthy">0</span><small>健康出口</small></div></div>
+        </div>
+        <div class="kpi-grid">
+          <article class="metric-card"><i class="metric-icon connections"><svg viewBox="0 0 24 24"><path d="M8 12h8M6 8l-4 4 4 4m12-8 4 4-4 4"/></svg></i><span>活跃连接</span><strong id="kpi-active">0</strong><small>TCP + UDP sessions</small></article>
+          <article class="metric-card"><i class="metric-icon total"><svg viewBox="0 0 24 24"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="9"/></svg></i><span>累计连接</span><strong id="kpi-total">0</strong><small>Since service start</small></article>
+          <article class="metric-card"><i class="metric-icon traffic"><svg viewBox="0 0 24 24"><path d="M7 17V4m0 0L3 8m4-4 4 4m6-1v13m0 0 4-4m-4 4-4-4"/></svg></i><span>总流量</span><strong id="kpi-traffic">0 B</strong><small>Upload + download</small></article>
+          <article class="metric-card"><i class="metric-icon memory"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3"/></svg></i><span>内存占用</span><strong id="kpi-memory">0 MB</strong><small id="kpi-goroutines">0 goroutines</small></article>
+        </div>
+        <div class="section-heading"><div><p class="eyebrow">INTERFACES</p><h3>出口状态</h3></div><span class="muted">按实例心跳策略</span></div>
+        <div class="interface-grid" id="interface-grid"><div class="empty-state">尚未创建出口配置</div></div>
+      </section>
+
+      <section class="page" id="page-configuration">
+        <div class="panel glass-card">
+          <div class="panel-head"><div><p class="eyebrow">SQLITE CONFIGURATION</p><h3>代理实例</h3></div><p>更改会立即持久化并热重载对应实例。</p></div>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>监听地址</th><th>出口接口</th><th>DNS</th><th>UDP</th><th>状态</th><th></th></tr></thead><tbody id="config-table"></tbody></table></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-performance">
+        <div class="kpi-grid perf-kpis">
+          <article class="metric-card"><span>TCP 上行</span><strong id="perf-tcp-up">0 B</strong></article>
+          <article class="metric-card"><span>TCP 下行</span><strong id="perf-tcp-down">0 B</strong></article>
+          <article class="metric-card"><span>UDP 上行</span><strong id="perf-udp-up">0 B</strong></article>
+          <article class="metric-card"><span>UDP 下行</span><strong id="perf-udp-down">0 B</strong></article>
+        </div>
+        <div class="panel glass-card chart-panel">
+          <div class="panel-head"><div><p class="eyebrow">LIVE THROUGHPUT</p><h3>实时吞吐趋势</h3></div><div class="chart-tools"><span>最近 5 分钟 · 自动刷新</span><div class="legend"><span><i class="blue"></i>上传</span><span><i class="purple"></i>下载</span></div></div></div>
+          <canvas id="traffic-chart" height="260"></canvas>
+        </div>
+        <div class="panel glass-card"><div class="panel-head"><div><p class="eyebrow">RUNTIME</p><h3>进程性能</h3></div></div><div class="runtime-grid" id="runtime-grid"></div></div>
+      </section>
+
+      <section class="page" id="page-logs">
+        <div class="panel glass-card">
+          <div class="panel-head log-head"><div><p class="eyebrow">PERSISTENT EVENTS</p><h3>运行日志</h3></div><div class="log-filters"><select id="log-level"><option>ALL</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option></select><input id="log-search" placeholder="搜索消息、实例或错误原因"><button class="secondary-button" id="log-refresh">刷新</button></div></div>
+          <div class="log-list" id="log-list"><div class="empty-state">暂无日志</div></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="settings-layout">
+          <form class="panel glass-card settings-panel" id="system-settings-form">
+            <div class="panel-head"><div><p class="eyebrow">SYSTEM SETTINGS</p><h3>系统设置</h3></div><span class="settings-badge" id="restart-badge">即时生效</span></div>
+            <p class="settings-copy">日志和新会话时长保存后立即生效；监听地址与数据库位置将在安全重启后生效。</p>
+            <div class="settings-fields">
+              <label>WebUI 监听地址<input required name="web_listen" placeholder="127.0.0.1:9090"><small>修改后需要重启服务</small></label>
+              <label>SQLite 数据库路径<input required name="database_path" placeholder="/var/lib/wwan-proxy/wwan-proxy.db"><small id="database-path-note">必须使用绝对路径，重启时自动迁移</small></label>
+              <label>日志保留天数<input required type="number" min="1" max="3650" name="log_retention_days"><small>保存后立即执行过期清理</small></label>
+              <label>登录会话有效期<input required name="session_lifetime" placeholder="24h"><small>适用于之后创建的新会话</small></label>
+            </div>
+            <div class="restart-notice hidden" id="restart-notice"><i>!</i><span><strong>存在待生效的启动设置</strong><small>请在合适时间重启 wwan-proxy；当前连接不会被自动中断。</small></span></div>
+            <div class="form-error" id="settings-error"></div>
+            <div class="panel-actions"><span></span><button class="primary-button" type="submit">保存系统设置</button></div>
+          </form>
+
+          <form class="panel glass-card settings-panel" id="admin-settings-form">
+            <div class="panel-head"><div><p class="eyebrow">ADMINISTRATOR</p><h3>管理员安全</h3></div><span class="security-mark">安全</span></div>
+            <p class="settings-copy">修改凭据后会保留当前浏览器，并立即撤销其他所有登录会话。</p>
+            <div class="settings-fields one-column">
+              <label>管理员用户名<input required name="username" autocomplete="username"></label>
+              <label>当前密码<input required type="password" name="current_password" autocomplete="current-password"></label>
+              <label>新密码<input type="password" name="new_password" autocomplete="new-password" placeholder="留空表示不修改密码"><small>修改时至少 12 个字符，最多 72 字节</small></label>
+              <label>确认新密码<input type="password" name="confirm_password" autocomplete="new-password"></label>
+            </div>
+            <div class="form-error" id="admin-settings-error"></div>
+            <div class="panel-actions"><span></span><button class="primary-button" type="submit">更新管理员</button></div>
+          </form>
+        </div>
+        <div class="panel glass-card sessions-panel">
+          <div class="panel-head"><div><p class="eyebrow">ACTIVE SESSIONS</p><h3>登录设备</h3></div><button class="secondary-button" id="revoke-others" type="button">撤销其他会话</button></div>
+          <div class="session-list" id="session-list"><div class="empty-state">正在读取登录会话…</div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modal">
+    <form class="modal glass-card" id="config-form">
+      <div class="modal-head"><div><p class="eyebrow">SERVER CONFIGURATION</p><h3 id="modal-title">新建出口</h3></div><button type="button" class="icon-button" id="modal-close">×</button></div>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>监听地址、出口接口与连接限制</span></div></div>
+        <label>名称<input required name="name" placeholder="wwan0"></label>
+        <label>出口接口<input required name="interface" placeholder="wwan0"></label>
+        <label>SOCKS5 监听<input required name="listen" value="0.0.0.0:1080"></label>
+        <label>最大连接数<input type="number" min="0" name="max_connections" value="1024"></label>
+        <label>连接超时<input name="connect_timeout" value="10s"></label>
+        <label>空闲超时<input name="idle_timeout" value="5m"></label>
+        <label>SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
+        <div class="form-section-heading span-2"><i>02</i><div><strong>访问认证</strong><span>配置 SOCKS5 客户端的访问凭据</span></div></div>
+        <label>认证方式<select name="auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
+        <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'></label>
+        <div class="form-section-heading span-2"><i>03</i><div><strong>名称解析</strong><span>系统 DNS、传统 DNS 或绑定接口的 DoH</span></div></div>
+        <label>DNS 模式<select name="dns_mode"><option value="system">系统 DNS</option><option value="servers">传统 DNS</option><option value="doh">DoH</option></select></label>
+        <label class="span-2 dns-servers-field">DNS 服务器<input name="dns_servers" placeholder="1.1.1.1:53, 8.8.8.8:53"></label>
+        <label class="span-2 doh-field">DoH URL<input name="doh_url" placeholder="https://cloudflare-dns.com/dns-query"></label>
+        <label class="span-2 doh-field">DoH Bootstrap IP<input name="doh_bootstrap" placeholder="1.1.1.1, 1.0.0.1"></label>
+        <label class="doh-field">DoH 超时<input name="doh_timeout" value="10s"></label>
+        <label class="toggle-label doh-field"><input type="checkbox" name="doh_insecure"><span></span>跳过 DoH TLS 校验</label>
+        <div class="form-section-heading span-2"><i>04</i><div><strong>UDP Relay</strong><span>每个会话从配置范围内自动选择空闲端口</span></div></div>
+        <label class="toggle-label"><input type="checkbox" name="udp_enabled" checked><span></span>启用 UDP ASSOCIATE</label>
+        <label>UDP 监听 IP<input name="udp_bind_ip" value="0.0.0.0"></label>
+        <label>UDP 广播 IP<input name="udp_advertise" value="auto"></label>
+        <label>UDP 空闲超时<input name="udp_idle_timeout" value="2m"></label>
+        <label>UDP 最小端口<input type="number" min="1024" max="65535" name="udp_port_min" value="10000"></label>
+        <label>UDP 最大端口<input type="number" min="1024" max="65535" name="udp_port_max" value="65535"></label>
+        <label class="span-2">广播地址映射 JSON<input name="udp_map" placeholder='{"192.168.1.1":"203.0.113.10"}'></label>
+        <div class="form-section-heading span-2"><i>05</i><div><strong>出口心跳</strong><span>健康检查同样通过当前 WWAN 接口发出</span></div></div>
+        <label class="span-2">心跳 URL<input required name="heartbeat_url" value="https://1.1.1.1/cdn-cgi/trace"></label>
+        <label>心跳间隔<input required name="heartbeat_interval" value="30s"></label>
+        <label>心跳超时<input required name="heartbeat_timeout" value="12s"></label>
+        <label class="toggle-label span-2"><input type="checkbox" name="enabled" checked><span></span>保存后立即启用此实例</label>
+      </div>
+      <div class="form-error" id="form-error"></div>
+      <div class="modal-actions"><button type="button" class="danger-button hidden" id="delete-button">删除配置</button><span></span><button type="button" class="secondary-button" id="cancel-button">取消</button><button type="submit" class="primary-button">保存并应用</button></div>
+    </form>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+[Unit]
+Description=WWAN SOCKS5 Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wwan-proxy
+Group=wwan-proxy
+UMask=0077
+StateDirectory=wwan-proxy
+StateDirectoryMode=0750
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/wwan-proxy -db /var/lib/wwan-proxy/wwan-proxy.db
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

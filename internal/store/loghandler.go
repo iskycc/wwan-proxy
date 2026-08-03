@@ -1,0 +1,115 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"sync"
+)
+
+type logSink struct {
+	store *Store
+	queue chan LogEntry
+	wg    sync.WaitGroup
+	once  sync.Once
+}
+
+func newLogSink(store *Store) *logSink {
+	s := &logSink{store: store, queue: make(chan LogEntry, 4096)}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for entry := range s.queue {
+			if err := store.InsertLog(context.Background(), entry); err != nil {
+				fmt.Fprintf(os.Stderr, "sqlite log insert failed: %v\n", err)
+			}
+		}
+	}()
+	return s
+}
+
+func (s *logSink) close() {
+	s.once.Do(func() { close(s.queue); s.wg.Wait() })
+}
+
+type PersistentHandler struct {
+	console slog.Handler
+	sink    *logSink
+	attrs   []slog.Attr
+	groups  []string
+}
+
+func NewPersistentHandler(console slog.Handler, store *Store) (*PersistentHandler, func()) {
+	sink := newLogSink(store)
+	return &PersistentHandler{console: console, sink: sink}, sink.close
+}
+
+func (h *PersistentHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return true
+}
+
+func (h *PersistentHandler) Handle(ctx context.Context, record slog.Record) error {
+	var consoleErr error
+	if h.console.Enabled(ctx, record.Level) {
+		consoleErr = h.console.Handle(ctx, record)
+	}
+	details := make(map[string]any)
+	for _, attr := range h.attrs {
+		addLogAttr(details, h.groups, attr)
+	}
+	record.Attrs(func(attr slog.Attr) bool { addLogAttr(details, h.groups, attr); return true })
+	entry := LogEntry{Timestamp: record.Time, Level: record.Level.String(), Message: record.Message, Details: details}
+	if v, ok := details["component"].(string); ok {
+		entry.Component = v
+	}
+	if v, ok := details["server"].(string); ok {
+		entry.ServerName = v
+	}
+	select {
+	case h.sink.queue <- entry:
+	default:
+		fmt.Fprintln(os.Stderr, "sqlite log queue full; dropping log entry")
+	}
+	return consoleErr
+}
+
+func (h *PersistentHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	clone := *h
+	clone.console = h.console.WithAttrs(attrs)
+	clone.attrs = append(append([]slog.Attr(nil), h.attrs...), attrs...)
+	return &clone
+}
+
+func (h *PersistentHandler) WithGroup(name string) slog.Handler {
+	clone := *h
+	clone.console = h.console.WithGroup(name)
+	clone.groups = append(append([]string(nil), h.groups...), name)
+	return &clone
+}
+
+func addLogAttr(dst map[string]any, groups []string, attr slog.Attr) {
+	attr.Value = attr.Value.Resolve()
+	if attr.Equal(slog.Attr{}) {
+		return
+	}
+	key := attr.Key
+	if len(groups) > 0 {
+		for i := len(groups) - 1; i >= 0; i-- {
+			key = groups[i] + "." + key
+		}
+	}
+	if attr.Value.Kind() == slog.KindGroup {
+		for _, nested := range attr.Value.Group() {
+			addLogAttr(dst, append(groups, attr.Key), nested)
+		}
+		return
+	}
+	if attr.Value.Kind() == slog.KindAny {
+		if err, ok := attr.Value.Any().(error); ok {
+			dst[key] = err.Error()
+			return
+		}
+	}
+	dst[key] = attr.Value.Any()
+}

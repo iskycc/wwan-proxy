@@ -1,0 +1,127 @@
+name: Test, build and release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Verify source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run static checks
+        run: go vet ./...
+
+      - name: Run race-enabled tests
+        run: go test -race ./...
+
+  build:
+    name: Build linux/${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            cc: gcc
+          - goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install ARM64 cross compiler
+        if: matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu
+
+      - name: Build package
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc }}
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          package_name="wwan-proxy-linux-${GOARCH}"
+          package_dir="dist/${package_name}"
+          mkdir -p "${package_dir}"
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${short_sha}" \
+            -o "${package_dir}/wwan-proxy" \
+            ./cmd/wwan-proxy
+          cp README.md wwan-proxy.service "${package_dir}/"
+          tar -C dist -czf "dist/${package_name}.tar.gz" "${package_name}"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wwan-proxy-linux-${{ matrix.goarch }}
+          path: dist/wwan-proxy-linux-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          release_tag="build-${short_sha}"
+          release_title="Continuous build ${short_sha}"
+          if gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${release_tag}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${release_tag}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "${release_title}" \
+              --generate-notes \
+              --prerelease
+          fi
