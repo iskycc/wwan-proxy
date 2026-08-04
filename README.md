@@ -14,7 +14,7 @@ Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理�
 - SQLite 持久化配置、结构化日志、错误和心跳状态
 - 首次访问初始化管理员，bcrypt 密码哈希与持久化登录会话
 - Apple-like 响应式 WebUI，针对 1440p、2K、4K 分级缩放，支持深色模式和细腻的加载/状态动画
-- 实时 SOCKS5、HTTP/HTTPS、UDP 会话数与流量，以及 GC live heap、系统内存和 goroutine 指标
+- 通过会话认证 WebSocket 实时推送 SOCKS5、HTTP/HTTPS、UDP 会话数与流量，以及 GC live heap、系统内存和 goroutine 指标；断线自动退避重连
 - 配置热应用、实例启停、日志搜索、会话管理和故障原因展示
 - WebUI 管理系统设置、管理员凭据、登录设备和数据库迁移
 
@@ -236,6 +236,7 @@ WebUI 使用以下同源接口：
 | `GET` | `/api/sessions` | 查询有效登录会话 |
 | `DELETE` | `/api/sessions/{id}` | 撤销指定登录会话 |
 | `POST` | `/api/sessions/revoke-others` | 撤销当前浏览器之外的会话 |
+| `GET` | `/api/ws` | WebSocket 实时推送配置、状态、心跳和性能总览 |
 | `GET` | `/api/overview` | 配置、状态、心跳和性能总览 |
 | `GET/POST` | `/api/servers` | 查询或创建配置 |
 | `PUT/DELETE` | `/api/servers/{id}` | 修改或删除配置 |
@@ -243,7 +244,7 @@ WebUI 使用以下同源接口：
 | `GET` | `/api/logs` | 查询 SQLite 日志 |
 | `GET` | `/api/health` | 管理服务健康状态 |
 
-除健康检查和认证接口外，所有 `/api/*` 接口都要求有效登录会话。修改类请求还会执行同源校验。
+除健康检查和认证接口外，所有 `/api/*` 接口都要求有效登录会话。修改类请求和 WebSocket 握手还会执行同源校验。WebUI 的动态总览只使用 `/api/ws`，`/api/overview` 保留供兼容与诊断使用，不参与页面轮询。
 
 ## systemd
 

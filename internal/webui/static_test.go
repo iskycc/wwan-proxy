@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestFrontendRefreshIsCoalesced(t *testing.T) {
+func TestFrontendUsesWebSocketAndCoalescesRefresh(t *testing.T) {
 	content, err := assets.ReadFile("static/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -13,6 +13,10 @@ func TestFrontendRefreshIsCoalesced(t *testing.T) {
 	js := string(content)
 	checks := []string{
 		"if(refreshPromise)return refreshPromise",
+		"new WebSocket(websocketURL())",
+		"overviewSocket.send('refresh')",
+		"reconnectTimer=setTimeout(()=>connectOverview(),delay)",
+		"stopOverviewSocket()",
 		"state.servers=overview.servers||[]",
 		"button.disabled=true",
 		"heap_live_bytes||state.overview.process.heap_bytes",
@@ -23,8 +27,13 @@ func TestFrontendRefreshIsCoalesced(t *testing.T) {
 			t.Fatalf("frontend refresh guard %q is missing", check)
 		}
 	}
+	for _, forbidden := range []string{"api('/api/overview')", "setInterval(refresh", "pollTimer"} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("frontend must not poll overview data; found %q", forbidden)
+		}
+	}
 	if strings.Contains(js, "api('/api/servers')") {
-		t.Fatal("refresh must not duplicate server configuration already returned by /api/overview")
+		t.Fatal("refresh must not duplicate server configuration already delivered over WebSocket")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"wwan-proxy/internal/config"
 	"wwan-proxy/internal/manager"
@@ -33,6 +37,10 @@ type Server struct {
 	limiter             *loginLimiter
 	startupWebListen    string
 	startupDatabasePath string
+	websocketContext    context.Context
+	websocketCancel     context.CancelFunc
+	websocketInterval   time.Duration
+	websocketClients    atomic.Int64
 	// initialLiveHeap keeps the dashboard stable until the runtime completes its first GC cycle.
 	initialLiveHeap atomic.Uint64
 }
@@ -42,7 +50,8 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 	if settings, err := st.SystemSettings(context.Background()); err == nil {
 		startupWebListen = settings.WebListen
 	}
-	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path()}
+	websocketContext, websocketCancel := context.WithCancel(context.Background())
+	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path(), websocketContext: websocketContext, websocketCancel: websocketCancel, websocketInterval: 2 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/initialize", s.initializeAdmin)
@@ -55,6 +64,7 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.saveSettings)
 	mux.HandleFunc("GET /api/overview", s.overview)
+	mux.HandleFunc("GET /api/ws", s.overviewWebSocket)
 	mux.HandleFunc("GET /api/servers", s.listServers)
 	mux.HandleFunc("POST /api/servers", s.saveServer)
 	mux.HandleFunc("PUT /api/servers/{id}", s.saveServer)
@@ -77,18 +87,28 @@ func (s *Server) ListenAndServe() error {
 	return err
 }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.websocketCancel()
+	return s.http.Shutdown(ctx)
+}
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
-	configs, err := s.store.ListServers(r.Context())
+	payload, err := s.overviewData(r.Context())
 	if err != nil {
-		s.internalError(w, r, "load overview configurations", err)
+		s.internalError(w, r, "load overview", err)
 		return
 	}
-	heartbeats, err := s.store.ListHeartbeats(r.Context())
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
+	configs, err := s.store.ListServers(ctx)
 	if err != nil {
-		s.internalError(w, r, "load heartbeat status", err)
-		return
+		return nil, fmt.Errorf("load overview configurations: %w", err)
+	}
+	heartbeats, err := s.store.ListHeartbeats(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load heartbeat status: %w", err)
 	}
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
@@ -102,10 +122,116 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		s.initialLiveHeap.CompareAndSwap(0, mem.HeapAlloc)
 		liveHeap = s.initialLiveHeap.Load()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": configs, "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
-		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC},
-	})
+		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC, "websocket_clients": s.websocketClients.Load()},
+	}, nil
+}
+
+var (
+	errWebSocketSessionExpired   = errors.New("websocket session expired")
+	errUnsupportedSocketMessage = errors.New("unsupported websocket message")
+)
+
+func (s *Server) overviewWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid request origin"})
+		return
+	}
+	tokenHash := currentSessionHash(r)
+	if tokenHash == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		return
+	}
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		s.log.Debug("WebSocket handshake failed", "remote", r.RemoteAddr, "error", err)
+		return
+	}
+	conn.SetReadLimit(64)
+	s.websocketClients.Add(1)
+	defer s.websocketClients.Add(-1)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// The HTTP request context is not valid after the connection is hijacked.
+	ctx, cancel := context.WithCancel(s.websocketContext)
+	defer cancel()
+	refresh := make(chan struct{}, 1)
+	readError := make(chan error, 1)
+	go func() {
+		for {
+			messageType, message, readErr := conn.Read(ctx)
+			if readErr != nil {
+				readError <- readErr
+				return
+			}
+			if messageType != websocket.MessageText || string(message) != "refresh" {
+				_ = conn.Close(websocket.StatusPolicyViolation, "unsupported message")
+				readError <- errUnsupportedSocketMessage
+				return
+			}
+			select {
+			case refresh <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	send := func() error {
+		_, valid, validateErr := s.store.ValidateSession(ctx, tokenHash, time.Now())
+		if validateErr != nil {
+			return fmt.Errorf("validate WebSocket session: %w", validateErr)
+		}
+		if !valid {
+			return errWebSocketSessionExpired
+		}
+		payload, dataErr := s.overviewData(ctx)
+		if dataErr != nil {
+			return dataErr
+		}
+		writeContext, writeCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer writeCancel()
+		return wsjson.Write(writeContext, conn, payload)
+	}
+	handleSendError := func(sendErr error) bool {
+		if sendErr == nil {
+			return false
+		}
+		if errors.Is(sendErr, errWebSocketSessionExpired) {
+			_ = conn.Close(websocket.StatusPolicyViolation, "session expired")
+			return true
+		}
+		if ctx.Err() == nil && websocket.CloseStatus(sendErr) == -1 {
+			s.log.Warn("WebSocket overview push failed", "remote", r.RemoteAddr, "error", sendErr)
+		}
+		return true
+	}
+	if handleSendError(send()) {
+		return
+	}
+
+	ticker := time.NewTicker(s.websocketInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case readErr := <-readError:
+			status := websocket.CloseStatus(readErr)
+			if status == -1 && ctx.Err() == nil && !errors.Is(readErr, errUnsupportedSocketMessage) {
+				s.log.Debug("WebSocket connection ended", "remote", r.RemoteAddr, "error", readErr)
+			}
+			return
+		case <-refresh:
+			if handleSendError(send()) {
+				return
+			}
+		case <-ticker.C:
+			if handleSendError(send()) {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) listServers(w http.ResponseWriter, r *http.Request) {
