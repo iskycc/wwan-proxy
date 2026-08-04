@@ -40,3 +40,19 @@ func TestFrontendHasLargeDisplayBreakpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestFrontendExposesHTTPProxyConfigurationAndMetrics(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []string{"http_proxy_enabled", "http_proxy_listen", "http_metrics", "HTTP Proxy"} {
+		if !strings.Contains(string(jsContent)+string(htmlContent), check) {
+			t.Fatalf("HTTP proxy frontend binding %q is missing", check)
+		}
+	}
+}

@@ -36,6 +36,24 @@ func TestServerJSONAndDefaults(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyValidation(t *testing.T) {
+	cfg := Server{
+		Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", Auth: Auth{Method: "none"},
+		HTTPProxy: HTTPProxy{Enabled: true, Listen: "127.0.0.1:8080"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.HTTPProxy.Listen = cfg.Listen
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted an HTTP proxy listener that conflicts with SOCKS5")
+	}
+	cfg.HTTPProxy.Listen = "missing-port"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted an invalid HTTP proxy listen address")
+	}
+}
+
 func TestCustomUDPRangeAndHeartbeatValidation(t *testing.T) {
 	cfg := Server{
 		Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", Auth: Auth{Method: "none"},

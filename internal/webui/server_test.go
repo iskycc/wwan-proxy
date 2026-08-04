@@ -57,7 +57,7 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	cfg := config.Server{Enabled: false, Name: "wwan-test", Listen: "127.0.0.1:11880", Interface: "lo", Auth: config.Auth{Method: "none"}, UDP: config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto"}}
+	cfg := config.Server{Enabled: false, Name: "wwan-test", Listen: "127.0.0.1:11880", HTTPProxy: config.HTTPProxy{Enabled: true, Listen: "127.0.0.1:18080"}, Interface: "lo", Auth: config.Auth{Method: "none"}, UDP: config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto"}}
 	raw, _ := json.Marshal(cfg)
 	resp, err = client.Post(ts.URL+"/api/servers", "application/json", bytes.NewReader(raw))
 	if err != nil {
@@ -72,8 +72,8 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if saved.ID == 0 {
-		t.Fatal("configuration was not persisted")
+	if saved.ID == 0 || !saved.HTTPProxy.Enabled || saved.HTTPProxy.Listen != "127.0.0.1:18080" {
+		t.Fatalf("HTTP proxy configuration was not persisted: %+v", saved)
 	}
 
 	resp, err = client.Get(ts.URL + "/api/overview")

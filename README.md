@@ -1,10 +1,11 @@
 # wwan-proxy
 
-Linux 多出口 SOCKS5 服务与管理面板。每个代理实例对应一个 `wwan0`、`wwan1`、`wwan2`、`wwan3` 或其他网络接口，外连 TCP、UDP、传统 DNS、DoH 和健康检查均使用 `SO_BINDTODEVICE` 强制从指定接口发出。
+Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理实例对应一个 `wwan0`、`wwan1`、`wwan2`、`wwan3` 或其他网络接口，外连 TCP、UDP、传统 DNS、DoH 和健康检查均使用 `SO_BINDTODEVICE` 强制从指定接口发出。
 
 ## 功能
 
 - SOCKS5 `CONNECT`、`BIND`、`UDP ASSOCIATE`
+- HTTP forward proxy 与 HTTPS `CONNECT` 隧道（不解密、不替换目标证书）
 - IPv4、IPv6和域名目标
 - 无认证或 RFC 1929 用户名密码认证
 - 传统 DNS 和 DoH；DNS 请求绑定对应 WWAN
@@ -13,7 +14,7 @@ Linux 多出口 SOCKS5 服务与管理面板。每个代理实例对应一个 `w
 - SQLite 持久化配置、结构化日志、错误和心跳状态
 - 首次访问初始化管理员，bcrypt 密码哈希与持久化登录会话
 - Apple-like 响应式 WebUI，针对 1440p、2K、4K 分级缩放，支持深色模式和细腻的加载/状态动画
-- 实时 TCP/UDP 连接数、流量、GC live heap、系统内存和 goroutine 指标
+- 实时 SOCKS5、HTTP/HTTPS、UDP 会话数与流量，以及 GC live heap、系统内存和 goroutine 指标
 - 配置热应用、实例启停、日志搜索、会话管理和故障原因展示
 - WebUI 管理系统设置、管理员凭据、登录设备和数据库迁移
 
@@ -107,13 +108,29 @@ sudo setcap cap_net_raw=+ep ./wwan-proxy
 
 `-web` 可作为紧急启动覆盖项，例如 `-web 127.0.0.1:9091`；显式传入时会覆盖 SQLite 中保存的 WebUI 监听地址。正常运行不建议固定传入，以便设置页修改的地址在重启后生效。
 
+## HTTP / HTTPS Proxy
+
+在 WebUI 的出口配置中启用“HTTP / HTTPS Proxy”并设置独立监听地址，例如 `0.0.0.0:8080`。普通 HTTP 请求使用 absolute-form 转发；HTTPS 使用标准 HTTP `CONNECT` 建立端到端 TCP 隧道，程序不执行 TLS 中间人解密，也不生成或替换证书。
+
+HTTP 转发、HTTPS CONNECT 目标连接和域名解析复用该实例的出口拨号器，均绑定配置的 WWAN 接口；选择传统 DNS 或 DoH 时也沿用对应的接口绑定。HTTP Proxy 与 SOCKS5 共用用户名密码、连接超时、空闲超时和并发限制配置。
+
+```bash
+# HTTP 目标
+curl -x http://proxyuser:password@127.0.0.1:8080 http://ifconfig.me
+
+# HTTPS 目标；curl 自动发送 CONNECT
+curl -x http://proxyuser:password@127.0.0.1:8080 https://ifconfig.me
+```
+
+HTTP Proxy 监听端口必须与任何实例的 SOCKS5 或已启用 HTTP Proxy 监听端口不同。部署防火墙时需额外开放所配置的 TCP 监听端口。
+
 ## SQLite 数据
 
 SQLite 是唯一配置源，主要数据表为：
 
 | 表 | 内容 |
 | --- | --- |
-| `server_configs` | SOCKS5 实例、认证、DNS、DoH 和 UDP 配置 |
+| `server_configs` | SOCKS5、HTTP/HTTPS Proxy、认证、DNS、DoH 和 UDP 配置 |
 | `event_logs` | INFO、WARN、ERROR、DEBUG 结构化日志及错误上下文 |
 | `heartbeat_status` | 每个出口最新心跳、延迟、HTTP 状态、公网 IP、POP 和错误 |
 | `admin_users` | 单一 WebUI 管理员账号与 bcrypt 密码哈希 |
@@ -207,6 +224,7 @@ journalctl -u wwan-proxy -f
 ```bash
 tcpdump -ni wwan0 host 1.1.1.1
 curl --socks5-hostname proxyuser:password@127.0.0.1:1080 https://ifconfig.me
+curl -x http://proxyuser:password@127.0.0.1:8080 https://ifconfig.me
 ```
 
 WebUI 心跳卡片显示的公网 IP 应与该 WWAN 实际出口一致。

@@ -52,6 +52,7 @@ type Server struct {
 	BindTimeout    Duration  `json:"bind_timeout"`
 	MaxConnections int       `json:"max_connections"`
 	Auth           Auth      `json:"auth"`
+	HTTPProxy      HTTPProxy `json:"http_proxy"`
 	UDP            UDP       `json:"udp"`
 	Heartbeat      Heartbeat `json:"heartbeat"`
 }
@@ -59,6 +60,11 @@ type Server struct {
 type Auth struct {
 	Method string            `json:"method"`
 	Users  map[string]string `json:"users,omitempty"`
+}
+
+type HTTPProxy struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"`
 }
 
 type DNS struct {
@@ -194,6 +200,17 @@ func (s *Server) Validate() error {
 	}
 	if s.Auth.Method == "username_password" && len(s.Auth.Users) == 0 {
 		return fmt.Errorf("auth.users must not be empty")
+	}
+	if s.HTTPProxy.Enabled {
+		if s.HTTPProxy.Listen == "" {
+			return fmt.Errorf("http_proxy.listen is required when enabled")
+		}
+		if _, _, err := net.SplitHostPort(s.HTTPProxy.Listen); err != nil {
+			return fmt.Errorf("http_proxy.listen: %w", err)
+		}
+		if s.HTTPProxy.Listen == s.Listen {
+			return fmt.Errorf("http_proxy.listen must differ from the SOCKS5 listen address")
+		}
 	}
 	for user, password := range s.Auth.Users {
 		if len(user) == 0 || len(user) > 255 || len(password) == 0 || len(password) > 255 {

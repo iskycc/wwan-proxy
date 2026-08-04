@@ -1,0 +1,326 @@
+package httpproxy
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"wwan-proxy/internal/config"
+)
+
+func TestHTTPForwardingHeadersAndMetrics(t *testing.T) {
+	var gotVia, gotHop, gotProxyAuth, gotBody, gotHost string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVia = r.Header.Get("Via")
+		gotHop = r.Header.Get("X-Remove-Me")
+		gotProxyAuth = r.Header.Get("Proxy-Authorization")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		gotHost = r.Host
+		w.Header().Set("X-Origin", "yes")
+		_, _ = w.Write([]byte("forwarded:" + r.URL.Path))
+	}))
+	defer origin.Close()
+
+	proxy, proxyURL := startTestProxy(t, config.Server{Auth: config.Auth{Method: "none"}})
+	defer proxy.Close()
+	client := proxyClient(proxyURL, nil)
+	req, err := http.NewRequest(http.MethodPost, origin.URL+"/resource", strings.NewReader("request-body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Connection", "X-Remove-Me")
+	req.Header.Set("X-Remove-Me", "secret")
+	req.Header.Set("Proxy-Authorization", "should-not-leak")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "forwarded:/resource" || resp.Header.Get("X-Origin") != "yes" {
+		t.Fatalf("status=%d body=%q headers=%v", resp.StatusCode, body, resp.Header)
+	}
+	if gotVia != "1.1 wwan-proxy" || gotHop != "" || gotProxyAuth != "" || gotBody != "request-body" || gotHost != strings.TrimPrefix(origin.URL, "http://") {
+		t.Fatalf("via=%q hop=%q proxy_auth=%q body=%q host=%q", gotVia, gotHop, gotProxyAuth, gotBody, gotHost)
+	}
+	if resp.Header.Get("Via") != "1.1 wwan-proxy" {
+		t.Fatalf("response Via=%q", resp.Header.Get("Via"))
+	}
+	metrics := proxy.Metrics()
+	if metrics.HTTPRequests != 1 || metrics.ConnectTunnels != 0 || metrics.UploadBytes != uint64(len("request-body")) || metrics.DownloadBytes == 0 || metrics.ActiveRequests != 0 {
+		t.Fatalf("unexpected metrics %+v", metrics)
+	}
+}
+
+func TestAbsoluteTargetOverridesConflictingHost(t *testing.T) {
+	gotHost := make(chan string, 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost <- r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	proxy := New(config.Server{Auth: config.Auth{Method: "none"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), (&net.Dialer{}).DialContext)
+	req := httptest.NewRequest(http.MethodGet, origin.URL+"/host-check", nil)
+	req.RequestURI = origin.URL + "/host-check"
+	req.Host = "attacker.invalid"
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, req)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body)
+	}
+	if host := <-gotHost; host != strings.TrimPrefix(origin.URL, "http://") {
+		t.Fatalf("origin received Host %q", host)
+	}
+}
+
+func TestHTTPSConnectTunnel(t *testing.T) {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("secure-through-connect"))
+	}))
+	defer origin.Close()
+	proxy, proxyURL := startTestProxy(t, config.Server{Auth: config.Auth{Method: "none"}})
+	defer proxy.Close()
+	client := proxyClient(proxyURL, &tls.Config{InsecureSkipVerify: true}) // test server certificate
+	client.Transport.(*http.Transport).DisableKeepAlives = true
+	resp, err := client.Get(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "secure-through-connect" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	}
+	var metrics MetricsSnapshot
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		metrics = proxy.Metrics()
+		if metrics.ActiveRequests == 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if metrics.ConnectTunnels != 1 || metrics.UploadBytes == 0 || metrics.DownloadBytes == 0 || metrics.ActiveRequests != 0 {
+		t.Fatalf("unexpected CONNECT metrics %+v", metrics)
+	}
+}
+
+func TestProxyBasicAuthenticationForHTTPAndHTTPS(t *testing.T) {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != "" {
+			t.Error("Proxy-Authorization leaked to origin")
+		}
+		_, _ = w.Write([]byte("authenticated"))
+	}))
+	defer origin.Close()
+	cfg := config.Server{Auth: config.Auth{Method: "username_password", Users: map[string]string{"alice": "correct horse"}}}
+	proxy, proxyURL := startTestProxy(t, cfg)
+	defer proxy.Close()
+
+	unauthenticated := proxyClient(proxyURL, nil)
+	resp, err := unauthenticated.Get("http://example.invalid/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired || !strings.HasPrefix(resp.Header.Get("Proxy-Authenticate"), "Basic ") {
+		t.Fatalf("status=%d challenge=%q", resp.StatusCode, resp.Header.Get("Proxy-Authenticate"))
+	}
+
+	authURL := *proxyURL
+	authURL.User = url.UserPassword("alice", "correct horse")
+	authenticated := proxyClient(&authURL, &tls.Config{InsecureSkipVerify: true}) // test server certificate
+	resp, err = authenticated.Get(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "authenticated" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	}
+	if proxy.Metrics().RequestErrors != 1 {
+		t.Fatalf("unexpected authentication metrics %+v", proxy.Metrics())
+	}
+}
+
+func TestConcurrentHTTPForwarding(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		_, _ = fmt.Fprintf(w, "ok:%s", r.URL.Query().Get("id"))
+	}))
+	defer origin.Close()
+	proxy, proxyURL := startTestProxy(t, config.Server{Auth: config.Auth{Method: "none"}, MaxConnections: 256})
+	defer proxy.Close()
+	client := proxyClient(proxyURL, nil)
+	const requests = 100
+	var wg sync.WaitGroup
+	errors := make(chan error, requests)
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			resp, err := client.Get(fmt.Sprintf("%s/?id=%d", origin.URL, id))
+			if err != nil {
+				errors <- err
+				return
+			}
+			_, readErr := io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil || resp.StatusCode != http.StatusOK {
+				errors <- fmt.Errorf("status=%d read=%v", resp.StatusCode, readErr)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+	metrics := proxy.Metrics()
+	if metrics.TotalRequests != requests || metrics.HTTPRequests != requests || metrics.RequestErrors != 0 || metrics.ActiveRequests != 0 {
+		t.Fatalf("unexpected concurrent metrics %+v", metrics)
+	}
+}
+
+func TestInvalidTargetsAndAuthority(t *testing.T) {
+	proxy := New(config.Server{Auth: config.Auth{Method: "none"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), (&net.Dialer{}).DialContext)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/origin-form", nil))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("origin-form status=%d", recorder.Code)
+	}
+	for _, authority := range []string{"", "user@example.com:443", "example.com:70000", "example.com/path"} {
+		if _, err := normalizeAuthority(authority, "443"); err == nil {
+			t.Fatalf("accepted authority %q", authority)
+		}
+	}
+	if got, err := normalizeAuthority("[::1]", "443"); err != nil || got != "[::1]:443" {
+		t.Fatalf("IPv6 authority got=%q err=%v", got, err)
+	}
+	mismatch := httptest.NewRecorder()
+	proxy.ServeHTTP(mismatch, &http.Request{Method: http.MethodConnect, RequestURI: "example.com:443", Host: "other.example:443", Header: make(http.Header)})
+	if mismatch.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched CONNECT Host status=%d", mismatch.Code)
+	}
+}
+
+func startTestProxy(t *testing.T, cfg config.Server) (*Server, *url.URL) {
+	t.Helper()
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = config.Duration(2 * time.Second)
+	}
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = config.Duration(2 * time.Second)
+	}
+	proxy := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), (&net.Dialer{Timeout: 2 * time.Second}).DialContext)
+	ts := httptest.NewServer(proxy)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = proxy.Close()
+	})
+	proxyURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proxy, proxyURL
+}
+
+func proxyClient(proxyURL *url.URL, tlsConfig *tls.Config) *http.Client {
+	transport := &http.Transport{
+		Proxy:           http.ProxyURL(proxyURL),
+		TLSClientConfig: tlsConfig,
+		DialContext:     (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+	}
+	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
+}
+
+func TestDialContextIsUsed(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	defer origin.Close()
+	called := make(chan string, 1)
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	proxy := New(config.Server{Auth: config.Auth{Method: "none"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(ctx context.Context, network, address string) (net.Conn, error) {
+		called <- address
+		return dialer.DialContext(ctx, network, address)
+	})
+	ts := httptest.NewServer(proxy)
+	defer ts.Close()
+	proxyURL, _ := url.Parse(ts.URL)
+	resp, err := proxyClient(proxyURL, nil).Get(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	select {
+	case address := <-called:
+		if address != strings.TrimPrefix(origin.URL, "http://") {
+			t.Fatalf("dialed %q", address)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("custom outbound dialer was not used")
+	}
+}
+
+func TestCloseTerminatesHijackedConnectTunnel(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer origin.Close()
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr == nil {
+			defer conn.Close()
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+
+	proxy, proxyURL := startTestProxy(t, config.Server{Auth: config.Auth{Method: "none"}})
+	conn, err := net.DialTimeout("tcp", proxyURL.Host, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", origin.Addr(), origin.Addr())
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(status, " 200 ") {
+		t.Fatalf("CONNECT status=%q err=%v", status, err)
+	}
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if err := proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("CONNECT client remained open after proxy close")
+	}
+	deadline := time.Now().Add(time.Second)
+	for proxy.Metrics().ActiveRequests != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if proxy.Metrics().ActiveRequests != 0 {
+		t.Fatalf("CONNECT handler remained active: %+v", proxy.Metrics())
+	}
+}

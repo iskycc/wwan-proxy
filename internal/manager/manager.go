@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"wwan-proxy/internal/config"
+	"wwan-proxy/internal/httpproxy"
 	"wwan-proxy/internal/socks5"
 	"wwan-proxy/internal/store"
 )
@@ -25,25 +26,30 @@ type Manager struct {
 type instance struct {
 	cfg       config.Server
 	server    *socks5.Server
+	httpProxy *httpproxy.Server
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	startedAt time.Time
 
-	mu        sync.RWMutex
-	running   bool
-	lastError string
+	mu           sync.RWMutex
+	socksRunning bool
+	httpRunning  bool
+	lastError    string
 }
 
 type InstanceSnapshot struct {
-	ID        int64                  `json:"id"`
-	Name      string                 `json:"name"`
-	Enabled   bool                   `json:"enabled"`
-	Running   bool                   `json:"running"`
-	Listen    string                 `json:"listen"`
-	Interface string                 `json:"interface"`
-	StartedAt time.Time              `json:"started_at,omitempty"`
-	LastError string                 `json:"last_error,omitempty"`
-	Metrics   socks5.MetricsSnapshot `json:"metrics"`
+	ID          int64                     `json:"id"`
+	Name        string                    `json:"name"`
+	Enabled     bool                      `json:"enabled"`
+	Running     bool                      `json:"running"`
+	Listen      string                    `json:"listen"`
+	Interface   string                    `json:"interface"`
+	StartedAt   time.Time                 `json:"started_at,omitempty"`
+	LastError   string                    `json:"last_error,omitempty"`
+	Metrics     socks5.MetricsSnapshot    `json:"metrics"`
+	HTTPListen  string                    `json:"http_listen,omitempty"`
+	HTTPRunning bool                      `json:"http_running"`
+	HTTPMetrics httpproxy.MetricsSnapshot `json:"http_metrics"`
 }
 
 func New(ctx context.Context, st *store.Store, logger *slog.Logger) *Manager {
@@ -92,7 +98,12 @@ func (m *Manager) Close() {
 func (m *Manager) start(cfg config.Server) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	srv := socks5.New(cfg, m.log)
-	inst := &instance{cfg: cfg, server: srv, cancel: cancel, startedAt: time.Now(), running: true}
+	var httpProxy *httpproxy.Server
+	if cfg.HTTPProxy.Enabled {
+		dialer := srv.OutboundDialer()
+		httpProxy = httpproxy.New(cfg, m.log, dialer.DialContext)
+	}
+	inst := &instance{cfg: cfg, server: srv, httpProxy: httpProxy, cancel: cancel, startedAt: time.Now(), socksRunning: true, httpRunning: cfg.HTTPProxy.Enabled}
 	m.mu.Lock()
 	if old := m.instances[cfg.ID]; old != nil {
 		m.mu.Unlock()
@@ -114,7 +125,7 @@ func (m *Manager) start(cfg config.Server) {
 		defer inst.wg.Done()
 		err := srv.ListenAndServe(ctx)
 		inst.mu.Lock()
-		inst.running = false
+		inst.socksRunning = false
 		if err != nil {
 			inst.lastError = err.Error()
 		}
@@ -123,6 +134,22 @@ func (m *Manager) start(cfg config.Server) {
 			m.log.Error("SOCKS5 listener stopped", "server", cfg.Name, "listen", cfg.Listen, "interface", cfg.Interface, "error", err)
 		}
 	}()
+	if httpProxy != nil {
+		inst.wg.Add(1)
+		go func() {
+			defer inst.wg.Done()
+			err := httpProxy.ListenAndServe(ctx)
+			inst.mu.Lock()
+			inst.httpRunning = false
+			if err != nil {
+				inst.lastError = "HTTP proxy: " + err.Error()
+			}
+			inst.mu.Unlock()
+			if err != nil {
+				m.log.Error("HTTP/HTTPS proxy listener stopped", "server", cfg.Name, "listen", cfg.HTTPProxy.Listen, "interface", cfg.Interface, "error", err)
+			}
+		}()
+	}
 	go func() { defer inst.wg.Done(); m.heartbeatLoop(ctx, inst) }()
 }
 
@@ -136,6 +163,9 @@ func (m *Manager) stop(id int64) {
 	}
 	inst.cancel()
 	_ = inst.server.Close()
+	if inst.httpProxy != nil {
+		_ = inst.httpProxy.Close()
+	}
 	inst.wg.Wait()
 	m.log.Info("server instance stopped", "server", inst.cfg.Name, "interface", inst.cfg.Interface)
 }
@@ -146,7 +176,12 @@ func (m *Manager) Snapshots() []InstanceSnapshot {
 	result := make([]InstanceSnapshot, 0, len(m.instances))
 	for _, inst := range m.instances {
 		inst.mu.RLock()
-		snap := InstanceSnapshot{ID: inst.cfg.ID, Name: inst.cfg.Name, Enabled: true, Running: inst.running, Listen: inst.cfg.Listen, Interface: inst.cfg.Interface, StartedAt: inst.startedAt, LastError: inst.lastError, Metrics: inst.server.Metrics()}
+		httpMetrics := httpproxy.MetricsSnapshot{}
+		if inst.httpProxy != nil {
+			httpMetrics = inst.httpProxy.Metrics()
+		}
+		running := inst.socksRunning && (!inst.cfg.HTTPProxy.Enabled || inst.httpRunning)
+		snap := InstanceSnapshot{ID: inst.cfg.ID, Name: inst.cfg.Name, Enabled: true, Running: running, Listen: inst.cfg.Listen, Interface: inst.cfg.Interface, StartedAt: inst.startedAt, LastError: inst.lastError, Metrics: inst.server.Metrics(), HTTPListen: inst.cfg.HTTPProxy.Listen, HTTPRunning: inst.httpRunning, HTTPMetrics: httpMetrics}
 		inst.mu.RUnlock()
 		result = append(result, snap)
 	}

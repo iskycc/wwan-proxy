@@ -54,12 +54,12 @@
 
       <section class="page active" id="page-overview">
         <div class="hero glass-card">
-          <div class="hero-copy"><span class="hero-label" id="hero-status"><i></i><b>SYSTEM OPERATIONAL</b></span><h2>每一条链路，<br><em>都在掌控之中。</em></h2><p>TCP、UDP、DNS 与 DoH 流量严格绑定指定 WWAN 出口，状态按每个实例的心跳策略自动验证。</p><div class="hero-chips"><span>SO_BINDTODEVICE</span><span>独立健康检测</span><span>SQLite 持久化</span></div></div>
+          <div class="hero-copy"><span class="hero-label" id="hero-status"><i></i><b>SYSTEM OPERATIONAL</b></span><h2>每一条链路，<br><em>都在掌控之中。</em></h2><p>SOCKS5、HTTP/HTTPS、UDP、DNS 与 DoH 流量严格绑定指定 WWAN 出口，状态按每个实例的心跳策略自动验证。</p><div class="hero-chips"><span>SO_BINDTODEVICE</span><span>独立健康检测</span><span>SQLite 持久化</span></div></div>
           <div class="network-viz" aria-label="健康出口拓扑"><div class="viz-halo halo-one"></div><div class="viz-halo halo-two"></div><i class="viz-node node-a"></i><i class="viz-node node-b"></i><i class="viz-node node-c"></i><i class="viz-node node-d"></i><div class="viz-core"><span id="hero-healthy">0</span><small>健康出口</small></div></div>
         </div>
         <div class="kpi-grid">
-          <article class="metric-card"><i class="metric-icon connections"><svg viewBox="0 0 24 24"><path d="M8 12h8M6 8l-4 4 4 4m12-8 4 4-4 4"/></svg></i><span>活跃连接</span><strong id="kpi-active">0</strong><small>TCP + UDP sessions</small></article>
-          <article class="metric-card"><i class="metric-icon total"><svg viewBox="0 0 24 24"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="9"/></svg></i><span>累计连接</span><strong id="kpi-total">0</strong><small>Since service start</small></article>
+          <article class="metric-card"><i class="metric-icon connections"><svg viewBox="0 0 24 24"><path d="M8 12h8M6 8l-4 4 4 4m12-8 4 4-4 4"/></svg></i><span>活跃会话</span><strong id="kpi-active">0</strong><small>SOCKS5 + HTTP + UDP</small></article>
+          <article class="metric-card"><i class="metric-icon total"><svg viewBox="0 0 24 24"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="9"/></svg></i><span>累计会话</span><strong id="kpi-total">0</strong><small>Connections + requests</small></article>
           <article class="metric-card"><i class="metric-icon traffic"><svg viewBox="0 0 24 24"><path d="M7 17V4m0 0L3 8m4-4 4 4m6-1v13m0 0 4-4m-4 4-4-4"/></svg></i><span>总流量</span><strong id="kpi-traffic">0 B</strong><small>Upload + download</small></article>
           <article class="metric-card"><i class="metric-icon memory"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3"/></svg></i><span>内存占用</span><strong id="kpi-memory">0 MB</strong><small id="kpi-goroutines">0 goroutines</small></article>
         </div>
@@ -70,7 +70,7 @@
       <section class="page" id="page-configuration">
         <div class="panel glass-card">
           <div class="panel-head"><div><p class="eyebrow">SQLITE CONFIGURATION</p><h3>代理实例</h3></div><p>更改会立即持久化并热重载对应实例。</p></div>
-          <div class="table-wrap"><table><thead><tr><th>名称</th><th>监听地址</th><th>出口接口</th><th>DNS</th><th>UDP</th><th>状态</th><th></th></tr></thead><tbody id="config-table"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>SOCKS5</th><th>HTTP Proxy</th><th>出口接口</th><th>DNS</th><th>UDP</th><th>状态</th><th></th></tr></thead><tbody id="config-table"></tbody></table></div>
         </div>
       </section>
 
@@ -137,15 +137,17 @@
       <div class="modal-head"><div><p class="eyebrow">SERVER CONFIGURATION</p><h3 id="modal-title">新建出口</h3></div><button type="button" class="icon-button" id="modal-close">×</button></div>
       <input type="hidden" name="id">
       <div class="form-grid">
-        <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>监听地址、出口接口与连接限制</span></div></div>
+        <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>SOCKS5、HTTP/HTTPS Proxy、出口接口与连接限制</span></div></div>
         <label>名称<input required name="name" placeholder="wwan0"></label>
         <label>出口接口<input required name="interface" placeholder="wwan0"></label>
         <label>SOCKS5 监听<input required name="listen" value="0.0.0.0:1080"></label>
+        <label class="toggle-label"><input type="checkbox" name="http_proxy_enabled"><span></span>启用 HTTP / HTTPS Proxy</label>
+        <label class="http-proxy-field">HTTP Proxy 监听<input name="http_proxy_listen" value="0.0.0.0:8080" placeholder="0.0.0.0:8080"></label>
         <label>最大连接数<input type="number" min="0" name="max_connections" value="1024"></label>
         <label>连接超时<input name="connect_timeout" value="10s"></label>
         <label>空闲超时<input name="idle_timeout" value="5m"></label>
         <label>SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
-        <div class="form-section-heading span-2"><i>02</i><div><strong>访问认证</strong><span>配置 SOCKS5 客户端的访问凭据</span></div></div>
+        <div class="form-section-heading span-2"><i>02</i><div><strong>访问认证</strong><span>SOCKS5 与 HTTP Proxy 共用访问凭据</span></div></div>
         <label>认证方式<select name="auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
         <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'></label>
         <div class="form-section-heading span-2"><i>03</i><div><strong>名称解析</strong><span>系统 DNS、传统 DNS 或绑定接口的 DoH</span></div></div>

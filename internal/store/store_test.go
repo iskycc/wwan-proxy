@@ -39,6 +39,35 @@ func TestServerPersistenceAndConflicts(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyListenConflicts(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	first := testServer("one", "127.0.0.1:11080")
+	first.HTTPProxy = config.HTTPProxy{Enabled: true, Listen: "127.0.0.1:18080"}
+	if err := s.SaveServer(context.Background(), &first); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []config.Server{
+		testServer("socks-vs-http", first.HTTPProxy.Listen),
+		testServer("http-vs-socks", "127.0.0.1:11081"),
+		testServer("http-vs-http", "127.0.0.1:11082"),
+	}
+	tests[1].HTTPProxy = config.HTTPProxy{Enabled: true, Listen: first.Listen}
+	tests[2].HTTPProxy = config.HTTPProxy{Enabled: true, Listen: first.HTTPProxy.Listen}
+	for _, cfg := range tests {
+		if err := s.SaveServer(context.Background(), &cfg); err == nil {
+			t.Fatalf("expected listener conflict for %+v", cfg)
+		}
+	}
+
+	disabled := testServer("disabled-http", "127.0.0.1:11083")
+	disabled.HTTPProxy = config.HTTPProxy{Enabled: false, Listen: first.HTTPProxy.Listen}
+	if err := s.SaveServer(context.Background(), &disabled); err != nil {
+		t.Fatalf("disabled HTTP listener should not reserve a port: %v", err)
+	}
+}
+
 func TestLogsAndHeartbeatPersistence(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

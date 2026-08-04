@@ -226,7 +226,18 @@ func (s *Store) SaveServer(ctx context.Context, cfg *config.Server) error {
 		return err
 	}
 	var conflictID int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM server_configs WHERE (name=? OR json_extract(config_json,'$.listen')=?) AND id<>? LIMIT 1`, cfg.Name, cfg.Listen, cfg.ID).Scan(&conflictID)
+	err := s.db.QueryRowContext(ctx, `
+SELECT id FROM server_configs
+WHERE id<>? AND (
+  name=? OR
+  json_extract(config_json,'$.listen')=? OR
+  (COALESCE(json_extract(config_json,'$.http_proxy.enabled'),0)=1 AND json_extract(config_json,'$.http_proxy.listen')=?) OR
+  (?=1 AND (
+    json_extract(config_json,'$.listen')=? OR
+    (COALESCE(json_extract(config_json,'$.http_proxy.enabled'),0)=1 AND json_extract(config_json,'$.http_proxy.listen')=?)
+  ))
+)
+LIMIT 1`, cfg.ID, cfg.Name, cfg.Listen, cfg.Listen, boolInt(cfg.HTTPProxy.Enabled), cfg.HTTPProxy.Listen, cfg.HTTPProxy.Listen).Scan(&conflictID)
 	if err == nil {
 		return fmt.Errorf("server name or listen address conflicts with server %d", conflictID)
 	}
