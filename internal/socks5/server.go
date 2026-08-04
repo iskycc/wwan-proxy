@@ -268,16 +268,56 @@ func (s *Server) dialer() *net.Dialer {
 	}
 }
 
+// DialContext dials an outbound target through the configured interface. When
+// IPv4-only DNS is enabled, hostnames are resolved with A queries only and the
+// resulting IPv4 addresses are attempted in resolver order. Explicit IPv6
+// literals remain valid because the setting controls DNS resolution, not the
+// SOCKS5 address types accepted from clients.
+func (s *Server) DialContext(parent context.Context, network, address string) (net.Conn, error) {
+	dialer := s.dialer()
+	if !s.cfg.DNS.IPv4Only {
+		return dialer.DialContext(parent, network, address)
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if net.ParseIP(host) != nil || strings.Contains(host, ":") {
+		return dialer.DialContext(parent, network, address)
+	}
+	ctx, cancel := context.WithTimeout(parent, dialer.Timeout)
+	defer cancel()
+	ips, err := s.resolver.LookupIP(ctx, "ip4", host)
+	if err != nil {
+		return nil, fmt.Errorf("lookup IPv4 %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("lookup IPv4 %s: no address", host)
+	}
+	connectNetwork := network
+	if network == "tcp" || network == "udp" {
+		connectNetwork += "4"
+	}
+	connectDialer := s.dialerWithoutResolver()
+	var failures []error
+	for i, ip := range ips {
+		attemptContext, attemptCancel := dividedAttemptContext(ctx, len(ips)-i)
+		conn, dialErr := connectDialer.DialContext(attemptContext, connectNetwork, net.JoinHostPort(ip.String(), port))
+		attemptCancel()
+		if dialErr == nil {
+			return conn, nil
+		}
+		failures = append(failures, fmt.Errorf("%s: %w", ip, dialErr))
+	}
+	return nil, fmt.Errorf("connect %s using IPv4: %w", address, errors.Join(failures...))
+}
+
 func (s *Server) resolutionTimeout() time.Duration {
 	if s.cfg.DNS.DoH != nil {
 		return s.cfg.DNS.DoH.Timeout.Value(10 * time.Second)
 	}
 	return s.cfg.ConnectTimeout.Value(10 * time.Second)
 }
-
-// OutboundDialer returns a dialer that uses the instance resolver and binds
-// every resulting socket to the configured network interface.
-func (s *Server) OutboundDialer() *net.Dialer { return s.dialer() }
 
 func (s *Server) newResolver() *net.Resolver {
 	if s.cfg.DNS.DoH != nil {
@@ -305,7 +345,7 @@ func (s *Server) dialerWithoutResolver() *net.Dialer {
 }
 
 func (s *Server) handleConnect(client net.Conn, dst address) error {
-	upstream, err := s.dialer().Dial("tcp", dst.String())
+	upstream, err := s.DialContext(context.Background(), "tcp", dst.String())
 	if err != nil {
 		_ = writeReply(client, replyForError(err), nil)
 		return fmt.Errorf("connect %s: %w", dst.String(), err)

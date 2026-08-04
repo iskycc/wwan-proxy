@@ -87,3 +87,16 @@ func TestDoHTimeoutRange(t *testing.T) {
 		}
 	}
 }
+
+func TestIPv4OnlyDoHRequiresIPv4Bootstrap(t *testing.T) {
+	tests := []DoH{
+		{URL: "https://dns.example/dns-query", BootstrapIPs: []string{"2001:db8::53"}, Timeout: Duration(time.Second)},
+		{URL: "https://[2001:db8::53]/dns-query", Timeout: Duration(time.Second)},
+	}
+	for _, doh := range tests {
+		cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{IPv4Only: true, DoH: &doh}}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "IPv") {
+			t.Fatalf("DoH=%+v err=%v", doh, err)
+		}
+	}
+}

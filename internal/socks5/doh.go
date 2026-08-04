@@ -42,6 +42,15 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 	if len(bootstrap) == 0 {
 		bootstrap = []string{u.Hostname()}
 	}
+	if s.cfg.DNS.IPv4Only {
+		ipv4Bootstrap := bootstrap[:0]
+		for _, ip := range bootstrap {
+			if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
+				ipv4Bootstrap = append(ipv4Bootstrap, ip)
+			}
+		}
+		bootstrap = ipv4Bootstrap
+	}
 	resolverContext, resolverCancel := context.WithCancel(context.Background())
 	doh := &dohResolver{
 		endpoint: cfg.URL,
@@ -104,7 +113,7 @@ func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 	var attemptErrors []error
 	for i := range d.upstreams {
 		upstream := d.upstreams[(start+i)%len(d.upstreams)]
-		attemptContext, cancel := dohAttemptContext(ctx, len(d.upstreams)-i)
+		attemptContext, cancel := dividedAttemptContext(ctx, len(d.upstreams)-i)
 		answer, err := d.queryUpstream(attemptContext, upstream, wire)
 		cancel()
 		if err == nil {
@@ -118,7 +127,7 @@ func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 	return nil, fmt.Errorf("DoH %s failed: %w", d.endpoint, errors.Join(attemptErrors...))
 }
 
-func dohAttemptContext(ctx context.Context, remainingAttempts int) (context.Context, context.CancelFunc) {
+func dividedAttemptContext(ctx context.Context, remainingAttempts int) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
 	if !ok || remainingAttempts <= 1 {
 		return context.WithCancel(ctx)

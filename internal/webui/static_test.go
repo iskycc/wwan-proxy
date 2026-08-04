@@ -66,6 +66,23 @@ func TestFrontendExposesHTTPProxyConfigurationAndMetrics(t *testing.T) {
 	}
 }
 
+func TestFrontendExposesIPv4OnlyDNSConfiguration(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(jsContent) + string(htmlContent)
+	for _, check := range []string{"dns_ipv4_only", "ipv4_only", "不请求 AAAA", "· IPv4"} {
+		if !strings.Contains(content, check) {
+			t.Fatalf("IPv4-only DNS frontend binding %q is missing", check)
+		}
+	}
+}
+
 func TestFrontendUsesCustomSelectsAndReliableAuthVisibility(t *testing.T) {
 	jsContent, err := assets.ReadFile("static/app.js")
 	if err != nil {

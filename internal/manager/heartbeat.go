@@ -17,10 +17,8 @@ func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 	timeout := inst.cfg.Heartbeat.Timeout.Value(12 * time.Second)
 	interval := inst.cfg.Heartbeat.Interval.Value(30 * time.Second)
 	endpoint := inst.cfg.Heartbeat.URL
-	dialer := inst.server.OutboundDialer()
-	dialer.Timeout = timeout
 	transport := &http.Transport{
-		Proxy: nil, DialContext: dialer.DialContext, ForceAttemptHTTP2: true,
+		Proxy: nil, DialContext: inst.server.DialContext, ForceAttemptHTTP2: true,
 		IdleConnTimeout: interval + 15*time.Second, TLSHandshakeTimeout: timeout, ResponseHeaderTimeout: timeout,
 	}
 	defer transport.CloseIdleConnections()

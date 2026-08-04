@@ -152,6 +152,7 @@
         <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'></label>
         <div class="form-section-heading span-2"><i>03</i><div><strong>名称解析</strong><span>系统 DNS、传统 DNS 或绑定接口的 DoH</span></div></div>
         <label>DNS 模式<select class="native-select" name="dns_mode"><option value="system">系统 DNS</option><option value="servers">传统 DNS</option><option value="doh">DoH</option></select></label>
+        <label class="toggle-label"><input type="checkbox" name="dns_ipv4_only"><span></span>域名仅解析 IPv4（不请求 AAAA）</label>
         <label class="span-2 dns-servers-field">DNS 服务器<input name="dns_servers" placeholder="1.1.1.1:53, 8.8.8.8:53"></label>
         <label class="span-2 doh-field">DoH URL<input name="doh_url" placeholder="https://cloudflare-dns.com/dns-query"></label>
         <label class="span-2 doh-field">DoH Bootstrap IP<input name="doh_bootstrap" placeholder="1.1.1.1, 1.0.0.1"></label>

@@ -100,8 +100,7 @@ func (m *Manager) start(cfg config.Server) {
 	srv := socks5.New(cfg, m.log)
 	var httpProxy *httpproxy.Server
 	if cfg.HTTPProxy.Enabled {
-		dialer := srv.OutboundDialer()
-		httpProxy = httpproxy.New(cfg, m.log, dialer.DialContext)
+		httpProxy = httpproxy.New(cfg, m.log, srv.DialContext)
 	}
 	inst := &instance{cfg: cfg, server: srv, httpProxy: httpProxy, cancel: cancel, startedAt: time.Now(), socksRunning: true, httpRunning: cfg.HTTPProxy.Enabled}
 	m.mu.Lock()

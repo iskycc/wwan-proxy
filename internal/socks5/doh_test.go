@@ -186,7 +186,89 @@ func TestDoHAndConnectTimeoutsHaveIndependentBudgets(t *testing.T) {
 	}
 }
 
+func TestIPv4OnlyDialDoesNotSendAAAAQuery(t *testing.T) {
+	var aRequests atomic.Int32
+	var aaaaRequests atomic.Int32
+	dohServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		queryType, err := dnsTestQueryType(query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch queryType {
+		case 1:
+			aRequests.Add(1)
+		case 28:
+			aaaaRequests.Add(1)
+		}
+		answer, err := dnsTestResponseIPv4(query, [4]byte{127, 0, 0, 1})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(answer)
+	}))
+	defer dohServer.Close()
+	u, err := url.Parse(dohServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Host = "resolver.invalid:" + u.Port()
+	u.Path = "/dns-query"
+	target, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := target.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
+		URL: u.String(), BootstrapIPs: []string{"127.0.0.1"},
+		Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, targetPort, err := net.SplitHostPort(target.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := srv.DialContext(ctx, "tcp", net.JoinHostPort("example.test", targetPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	select {
+	case acceptedConn := <-accepted:
+		_ = acceptedConn.Close()
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if aRequests.Load() == 0 {
+		t.Fatal("IPv4-only dial did not issue an A query")
+	}
+	if got := aaaaRequests.Load(); got != 0 {
+		t.Fatalf("IPv4-only dial issued %d AAAA queries", got)
+	}
+}
+
 func dnsTestResponse(query []byte) ([]byte, error) {
+	return dnsTestResponseIPv4(query, [4]byte{192, 0, 2, 123})
+}
+
+func dnsTestResponseIPv4(query []byte, ip [4]byte) ([]byte, error) {
 	qtype, questionEnd, err := dnsTestQuestion(query)
 	if err != nil {
 		return nil, err
@@ -200,7 +282,7 @@ func dnsTestResponse(query []byte) ([]byte, error) {
 		return resp, nil
 	}
 	binary.BigEndian.PutUint16(resp[6:8], 1)
-	resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 123)
+	resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, ip[0], ip[1], ip[2], ip[3])
 	return resp, nil
 }
 

@@ -68,8 +68,9 @@ type HTTPProxy struct {
 }
 
 type DNS struct {
-	Servers []string `json:"servers,omitempty"`
-	DoH     *DoH     `json:"doh,omitempty"`
+	IPv4Only bool     `json:"ipv4_only"`
+	Servers  []string `json:"servers,omitempty"`
+	DoH      *DoH     `json:"doh,omitempty"`
 }
 
 type DoH struct {
@@ -237,6 +238,20 @@ func (s *Server) Validate() error {
 		for i, ip := range doh.BootstrapIPs {
 			if net.ParseIP(ip) == nil {
 				return fmt.Errorf("dns.doh.bootstrap_ips[%d] must be an IP address", i)
+			}
+		}
+		if s.DNS.IPv4Only {
+			if endpointIP := net.ParseIP(u.Hostname()); endpointIP != nil && endpointIP.To4() == nil {
+				return fmt.Errorf("dns.doh.url cannot use an IPv6 literal when dns.ipv4_only is enabled")
+			}
+			if net.ParseIP(u.Hostname()) == nil {
+				hasIPv4Bootstrap := false
+				for _, ip := range doh.BootstrapIPs {
+					hasIPv4Bootstrap = hasIPv4Bootstrap || net.ParseIP(ip).To4() != nil
+				}
+				if !hasIPv4Bootstrap {
+					return fmt.Errorf("dns.doh.bootstrap_ips must include an IPv4 address when dns.ipv4_only is enabled")
+				}
 			}
 		}
 		if time.Duration(doh.Timeout) < time.Second || time.Duration(doh.Timeout) > 2*time.Minute {

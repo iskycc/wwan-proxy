@@ -157,7 +157,17 @@ func (a *udpAssociation) resolve(dst address) (*net.UDPAddr, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.server.resolutionTimeout())
 	defer cancel()
-	ips, err := a.server.resolver.LookupIPAddr(ctx, dst.Host)
+	var ips []net.IPAddr
+	var err error
+	if a.server.cfg.DNS.IPv4Only {
+		resolved, lookupErr := a.server.resolver.LookupIP(ctx, "ip4", dst.Host)
+		err = lookupErr
+		for _, ip := range resolved {
+			ips = append(ips, net.IPAddr{IP: ip})
+		}
+	} else {
+		ips, err = a.server.resolver.LookupIPAddr(ctx, dst.Host)
+	}
 	if err != nil || len(ips) == 0 {
 		if err == nil {
 			err = fmt.Errorf("no address")
