@@ -209,7 +209,7 @@ HTTPS socket 在连接前绑定该实例的 `interface`。成功结果保存延�
 
 WebUI 可选择系统 DNS、传统 DNS或 DoH。传统 DNS socket 和 DoH HTTPS socket 都绑定实例的 WWAN 接口。
 
-DoH URL 使用域名时必须提供 `bootstrap_ips`，避免先使用系统 DNS解析 DoH 域名。程序直连引导 IP，但 TLS SNI、证书校验和 HTTP Host 仍使用 DoH URL 域名。多个引导 IP 会轮换并在连接失败时依次尝试。
+DoH URL 使用域名时必须提供 `bootstrap_ips`，避免先使用系统 DNS解析 DoH 域名。程序直连引导 IP，但 TLS SNI、证书校验和 HTTP Host 仍使用 DoH URL 域名。多个引导 IP 会轮换；TCP、TLS、HTTP 或响应校验任一阶段失败时，会在同一次解析的超时预算内切换其他引导 IP。A/AAAA 并发解析允许返回已经成功的地址族，不会因另一个地址族临时超时而丢弃可用结果。`doh_timeout` 可设置为 `1s`–`2m`，独立于目标 TCP 的 `connect_timeout`。
 
 ## UDP relay
 

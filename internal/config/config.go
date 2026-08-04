@@ -239,6 +239,9 @@ func (s *Server) Validate() error {
 				return fmt.Errorf("dns.doh.bootstrap_ips[%d] must be an IP address", i)
 			}
 		}
+		if time.Duration(doh.Timeout) < time.Second || time.Duration(doh.Timeout) > 2*time.Minute {
+			return fmt.Errorf("dns.doh.timeout must be between 1s and 2m")
+		}
 	}
 	if net.ParseIP(s.UDP.BindIP) == nil {
 		return fmt.Errorf("udp.bind_ip must be an IP address without a port")

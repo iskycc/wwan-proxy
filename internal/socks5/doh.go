@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -20,10 +21,19 @@ import (
 )
 
 type dohResolver struct {
-	endpoint string
-	client   *http.Client
-	headers  map[string]string
-	timeout  time.Duration
+	endpoint  string
+	upstreams []dohUpstream
+	headers   map[string]string
+	timeout   time.Duration
+	next      atomic.Uint64
+	context   context.Context
+	cancel    context.CancelFunc
+}
+
+type dohUpstream struct {
+	bootstrap string
+	client    *http.Client
+	transport *http.Transport
 }
 
 func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
@@ -32,46 +42,53 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 	if len(bootstrap) == 0 {
 		bootstrap = []string{u.Hostname()}
 	}
-	var next atomic.Uint64
-	transport := &http.Transport{
-		Proxy:             nil,
-		ForceAttemptHTTP2: true,
-		TLSClientConfig: &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			ServerName:         u.Hostname(),
-			InsecureSkipVerify: cfg.InsecureSkipVerify, // explicitly configured for private DoH deployments
-		},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			_, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			start := int((next.Add(1) - 1) % uint64(len(bootstrap)))
-			var lastErr error
-			for i := range bootstrap {
-				ip := bootstrap[(start+i)%len(bootstrap)]
-				conn, dialErr := s.dialerWithoutResolver().DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if dialErr == nil {
-					return conn, nil
-				}
-				lastErr = dialErr
-			}
-			return nil, lastErr
-		},
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: cfg.Timeout.Value(10 * time.Second),
-	}
+	resolverContext, resolverCancel := context.WithCancel(context.Background())
 	doh := &dohResolver{
 		endpoint: cfg.URL,
-		client: &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		}},
-		headers: cfg.Headers,
-		timeout: cfg.Timeout.Value(10 * time.Second),
+		headers:  cfg.Headers,
+		timeout:  cfg.Timeout.Value(10 * time.Second),
+		context:  resolverContext,
+		cancel:   resolverCancel,
 	}
-	return &net.Resolver{PreferGo: true, StrictErrors: true, Dial: func(_ context.Context, network, _ string) (net.Conn, error) {
-		conn := &dohConn{resolver: doh, network: network}
+	for _, bootstrapIP := range bootstrap {
+		ip := bootstrapIP
+		transport := &http.Transport{
+			Proxy:                 nil,
+			ForceAttemptHTTP2:     true,
+			DisableCompression:    true,
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   32,
+			MaxConnsPerHost:       64,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   min(doh.timeout, 10*time.Second),
+			ResponseHeaderTimeout: doh.timeout,
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				ServerName:         u.Hostname(),
+				InsecureSkipVerify: cfg.InsecureSkipVerify, // explicitly configured for private DoH deployments
+			},
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				return s.dialerWithoutResolver().DialContext(ctx, network, net.JoinHostPort(ip, port))
+			},
+		}
+		client := &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+		doh.upstreams = append(doh.upstreams, dohUpstream{bootstrap: ip, client: client, transport: transport})
+	}
+	s.resolverClose = func() {
+		doh.cancel()
+		for _, upstream := range doh.upstreams {
+			upstream.transport.CloseIdleConnections()
+		}
+	}
+	return &net.Resolver{PreferGo: true, StrictErrors: false, Dial: func(lookupContext context.Context, network, _ string) (net.Conn, error) {
+		connContext, connCancel := context.WithCancel(doh.context)
+		conn := &dohConn{resolver: doh, network: network, lookupContext: lookupContext, context: connContext, cancel: connCancel}
 		if strings.HasPrefix(network, "udp") {
 			return &dohPacketConn{dohConn: conn}, nil
 		}
@@ -80,6 +97,40 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 }
 
 func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
+	if len(d.upstreams) == 0 {
+		return nil, errors.New("no DoH bootstrap address configured")
+	}
+	start := int((d.next.Add(1) - 1) % uint64(len(d.upstreams)))
+	var attemptErrors []error
+	for i := range d.upstreams {
+		upstream := d.upstreams[(start+i)%len(d.upstreams)]
+		attemptContext, cancel := dohAttemptContext(ctx, len(d.upstreams)-i)
+		answer, err := d.queryUpstream(attemptContext, upstream, wire)
+		cancel()
+		if err == nil {
+			return answer, nil
+		}
+		attemptErrors = append(attemptErrors, fmt.Errorf("bootstrap %s: %w", upstream.bootstrap, err))
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, fmt.Errorf("DoH %s failed: %w", d.endpoint, errors.Join(attemptErrors...))
+}
+
+func dohAttemptContext(ctx context.Context, remainingAttempts int) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok || remainingAttempts <= 1 {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, remaining/time.Duration(remainingAttempts))
+}
+
+func (d *dohResolver) queryUpstream(ctx context.Context, upstream dohUpstream, wire []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(wire))
 	if err != nil {
 		return nil, err
@@ -89,12 +140,12 @@ func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 	for key, value := range d.headers {
 		req.Header.Set(key, value)
 	}
-	resp, err := d.client.Do(req)
+	resp, err := upstream.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("DoH server returned %s", resp.Status)
 	}
@@ -113,8 +164,11 @@ func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 }
 
 type dohConn struct {
-	resolver *dohResolver
-	network  string
+	resolver      *dohResolver
+	network       string
+	lookupContext context.Context
+	context       context.Context
+	cancel        context.CancelFunc
 
 	mu            sync.Mutex
 	response      []byte
@@ -129,7 +183,6 @@ func (c *dohConn) Write(p []byte) (int, error) {
 		c.mu.Unlock()
 		return 0, net.ErrClosed
 	}
-	deadline := c.writeDeadline
 	c.mu.Unlock()
 
 	wire := p
@@ -140,10 +193,17 @@ func (c *dohConn) Write(p []byte) (int, error) {
 		}
 		wire = p[2:]
 	}
-	if deadline.IsZero() {
-		deadline = time.Now().Add(c.resolver.timeout)
-	}
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	// net.Resolver applies the timeout from /etc/resolv.conf to its synthetic
+	// DNS connection. That timeout describes UDP/TCP DNS and must not override
+	// the explicit DoH timeout. Still propagate real caller cancellation and
+	// server shutdown so abandoned HTTPS requests do not linger.
+	ctx, cancel := context.WithTimeout(c.context, c.resolver.timeout)
+	stopLookupCancel := context.AfterFunc(c.lookupContext, func() {
+		if errors.Is(c.lookupContext.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	defer stopLookupCancel()
 	defer cancel()
 	answer, err := c.resolver.query(ctx, wire)
 	if err != nil {
@@ -186,6 +246,7 @@ func (c *dohConn) Close() error {
 	c.closed = true
 	c.response = nil
 	c.mu.Unlock()
+	c.cancel()
 	return nil
 }
 func (c *dohConn) LocalAddr() net.Addr  { return dohAddr("local") }

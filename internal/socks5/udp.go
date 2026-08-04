@@ -155,7 +155,7 @@ func (a *udpAssociation) resolve(dst address) (*net.UDPAddr, error) {
 	if ip := net.ParseIP(dst.Host); ip != nil {
 		return &net.UDPAddr{IP: ip, Port: int(dst.Port)}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), a.server.cfg.ConnectTimeout.Value(10*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), a.server.resolutionTimeout())
 	defer cancel()
 	ips, err := a.server.resolver.LookupIPAddr(ctx, dst.Host)
 	if err != nil || len(ips) == 0 {

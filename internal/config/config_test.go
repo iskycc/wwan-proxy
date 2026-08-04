@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +74,16 @@ func TestDoHDomainRequiresBootstrapIP(t *testing.T) {
 	cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{DoH: &DoH{URL: "https://dns.example/dns-query"}}}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestDoHTimeoutRange(t *testing.T) {
+	for _, timeout := range []time.Duration{time.Millisecond, 3 * time.Minute} {
+		cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{DoH: &DoH{
+			URL: "https://dns.example/dns-query", BootstrapIPs: []string{"192.0.2.53"}, Timeout: Duration(timeout),
+		}}}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "dns.doh.timeout") {
+			t.Fatalf("timeout=%v err=%v", timeout, err)
+		}
 	}
 }

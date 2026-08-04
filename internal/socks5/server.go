@@ -28,6 +28,8 @@ type Server struct {
 	log      *slog.Logger
 	listener net.Listener
 	resolver *net.Resolver
+	// resolverClose releases persistent DoH connections during hot reload and shutdown.
+	resolverClose func()
 
 	mu      sync.Mutex
 	active  map[net.Conn]struct{}
@@ -123,6 +125,9 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 	if ln != nil {
 		_ = ln.Close()
+	}
+	if s.resolverClose != nil {
+		s.resolverClose()
 	}
 	s.wg.Wait()
 	return nil
@@ -248,12 +253,26 @@ func (s *Server) passwordAuth(c net.Conn) error {
 }
 
 func (s *Server) dialer() *net.Dialer {
+	timeout := s.cfg.ConnectTimeout.Value(10 * time.Second)
+	// net.Dialer.Timeout includes DNS resolution. Give DoH its own configured
+	// budget so it cannot consume the entire TCP connection budget and collapse
+	// the useful upstream error into a generic "lookup: i/o timeout".
+	if s.cfg.DNS.DoH != nil {
+		timeout += s.cfg.DNS.DoH.Timeout.Value(10 * time.Second)
+	}
 	return &net.Dialer{
-		Timeout:   s.cfg.ConnectTimeout.Value(10 * time.Second),
+		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
 		Resolver:  s.resolver,
 		Control:   bindToDevice(s.cfg.Interface),
 	}
+}
+
+func (s *Server) resolutionTimeout() time.Duration {
+	if s.cfg.DNS.DoH != nil {
+		return s.cfg.DNS.DoH.Timeout.Value(10 * time.Second)
+	}
+	return s.cfg.ConnectTimeout.Value(10 * time.Second)
 }
 
 // OutboundDialer returns a dialer that uses the instance resolver and binds
