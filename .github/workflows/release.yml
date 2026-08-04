@@ -30,6 +30,11 @@ jobs:
       - name: Run static checks
         run: go vet ./...
 
+      - name: Validate OpenWrt init script
+        run: |
+          test -x openwrt/wwan-proxy.init
+          sh -n openwrt/wwan-proxy.init
+
       - name: Run race-enabled tests
         run: go test -race ./...
 
@@ -101,6 +106,7 @@ jobs:
             -o "${package_dir}/wwan-proxy" \
             ./cmd/wwan-proxy
           cp README.md wwan-proxy.service "${package_dir}/"
+          cp openwrt/wwan-proxy.init "${package_dir}/"
           tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
 
       - name: Verify static musl binary

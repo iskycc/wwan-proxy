@@ -1,0 +1,135 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+SERVICE_NAME="wwan-proxy"
+INSTANCE_NAME="main"
+
+WORKDIR="/opt/wwan-proxy"
+PROG="/opt/wwan-proxy/wwan-proxy"
+DATABASE="/opt/wwan-proxy/wwan-proxy.db"
+NOFILE=65535
+
+EXTRA_COMMANDS="status check log follow run"
+EXTRA_HELP="        status          Show wwan-proxy running status
+        check           Check working directory, binary and database path
+        log             Show recent wwan-proxy logs
+        follow          Follow wwan-proxy logs
+        run             Run wwan-proxy in foreground for debugging"
+
+validate_service() {
+    local ret=0
+    local version_output
+
+    if [ ! -d "$WORKDIR" ]; then
+        echo "ERROR: working directory not found: $WORKDIR"
+        ret=1
+    else
+        echo "OK: working directory exists: $WORKDIR"
+    fi
+
+    if [ ! -x "$PROG" ]; then
+        echo "ERROR: program not found or not executable: $PROG"
+        ret=1
+    else
+        version_output="$("$PROG" -version 2>&1)"
+        if [ "$?" -ne 0 ]; then
+            echo "ERROR: program exists but cannot be executed: $PROG"
+            echo "       $version_output"
+            echo "       Check CPU architecture and use the amd64-musl build on x86_64 OpenWrt."
+            ret=1
+        else
+            echo "OK: program is executable: $PROG (version: $version_output)"
+        fi
+    fi
+
+    if [ -e "$DATABASE" ]; then
+        if [ ! -f "$DATABASE" ]; then
+            echo "ERROR: database path exists but is not a regular file: $DATABASE"
+            ret=1
+        elif [ ! -r "$DATABASE" ] || [ ! -w "$DATABASE" ]; then
+            echo "ERROR: database is not readable and writable: $DATABASE"
+            ret=1
+        else
+            echo "OK: database is readable and writable: $DATABASE"
+        fi
+    elif [ -d "$WORKDIR" ] && [ -w "$WORKDIR" ]; then
+        echo "OK: database will be created on first start: $DATABASE"
+    else
+        echo "ERROR: database does not exist and working directory is not writable: $WORKDIR"
+        ret=1
+    fi
+
+    return "$ret"
+}
+
+start_service() {
+    # Keep boot quiet while still rejecting missing or incompatible binaries.
+    [ -d "$WORKDIR" ] || return 1
+    [ -x "$PROG" ] || return 1
+    [ -w "$WORKDIR" ] || return 1
+    "$PROG" -version >/dev/null 2>&1 || return 1
+    [ ! -e "$DATABASE" ] || { [ -f "$DATABASE" ] && [ -r "$DATABASE" ] && [ -w "$DATABASE" ]; } || return 1
+
+    procd_open_instance "$INSTANCE_NAME"
+
+    # Do not pass -web here: WebUI listen settings are persisted in SQLite.
+    # The shell only establishes the requested file descriptor limit and cwd;
+    # exec lets procd supervise the wwan-proxy process directly.
+    procd_set_param command /bin/sh -c "ulimit -n '$NOFILE' && cd '$WORKDIR' && exec '$PROG' -db '$DATABASE'"
+
+    # SQLite is intentionally not registered with procd_set_param file. The
+    # daemon writes logs, heartbeats and metrics to it continuously, so tracking
+    # the database would cause unnecessary restart loops.
+
+    # If the process exits repeatedly within 3600 seconds, wait 5 seconds before
+    # restarting it and stop after 5 unsuccessful retries.
+    procd_set_param respawn 3600 5 5
+    procd_set_param term_timeout 15
+
+    # Forward stdout/stderr to logd; persistent application logs also remain in SQLite.
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+
+    procd_close_instance
+}
+
+status() {
+    if procd_running "$SERVICE_NAME" "$INSTANCE_NAME"; then
+        echo "$SERVICE_NAME is running"
+        return 0
+    fi
+
+    echo "$SERVICE_NAME is not running"
+    return 1
+}
+
+check() {
+    validate_service
+}
+
+log() {
+    echo "Showing recent logs related to $SERVICE_NAME:"
+    logread | grep -i "$SERVICE_NAME"
+
+    if [ "$?" -ne 0 ]; then
+        echo "No log lines matched: $SERVICE_NAME"
+        echo "Tip: try: logread | tail -n 50"
+    fi
+}
+
+follow() {
+    echo "Following logs related to $SERVICE_NAME, press Ctrl+C to stop:"
+    logread -f | grep -i "$SERVICE_NAME"
+}
+
+run() {
+    validate_service || return 1
+    echo "Running in foreground:"
+    echo "cd $WORKDIR && $PROG -db $DATABASE"
+    ulimit -n "$NOFILE" || return 1
+    cd "$WORKDIR" || return 1
+    exec "$PROG" -db "$DATABASE"
+}

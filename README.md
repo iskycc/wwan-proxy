@@ -78,6 +78,48 @@ chmod +x wwan-proxy
 
 代理绑定 WWAN 接口仍需要 root 或对应网络能力。若设备输出为 `aarch64`，不能运行 amd64 包，需要另行提供 arm64 musl 构建。
 
+### OpenWrt procd 守护进程
+
+Release 包内包含 `wwan-proxy.init`。脚本使用以下固定路径：
+
+```text
+工作目录  /opt/wwan-proxy
+程序      /opt/wwan-proxy/wwan-proxy
+数据库    /opt/wwan-proxy/wwan-proxy.db
+```
+
+安装或更新时保留已有的 `wwan-proxy.db`：
+
+```bash
+mkdir -p /opt/wwan-proxy
+cp ./wwan-proxy /opt/wwan-proxy/wwan-proxy
+chmod 0755 /opt/wwan-proxy/wwan-proxy
+
+cp ./wwan-proxy.init /etc/init.d/wwan-proxy
+chmod 0755 /etc/init.d/wwan-proxy
+
+/etc/init.d/wwan-proxy check
+/etc/init.d/wwan-proxy enable
+/etc/init.d/wwan-proxy start
+/etc/init.d/wwan-proxy status
+```
+
+脚本由 procd 管理，文件描述符上限为 65535，异常退出后按 `respawn 3600 5 5` 策略重启，停止时最多等待 15 秒。程序以 root 启动，以便使用 `SO_BINDTODEVICE`；没有传入 `-web`，因此 WebUI 监听地址继续以 SQLite 设置为准。
+
+诊断命令：
+
+```bash
+/etc/init.d/wwan-proxy check
+/etc/init.d/wwan-proxy log
+/etc/init.d/wwan-proxy follow
+
+# 前台调试前先停止后台实例，避免监听端口冲突
+/etc/init.d/wwan-proxy stop
+/etc/init.d/wwan-proxy run
+```
+
+`check` 会实际执行 `wwan-proxy -version`，因此能够识别“文件存在且有执行权限，但 CPU 架构或动态加载器不兼容”的情况。SQLite 数据库不会注册为 procd 文件变更触发器，因为日志和心跳会持续写入该文件；将其作为触发器会造成循环重启。
+
 ## 启动
 
 程序不再读取 YAML、TOML 或 JSON 配置文件。首次运行会创建 SQLite 数据库，之后在 WebUI 中添加出口配置。
