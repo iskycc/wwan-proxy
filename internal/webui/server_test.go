@@ -134,6 +134,18 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatalf("post-logout status=%v err=%v", resp.StatusCode, err)
 	}
 	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/api/auth/status")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("post-logout auth status=%v err=%v", resp.StatusCode, err)
+	}
+	var postLogoutStatus map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&postLogoutStatus); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if postLogoutStatus["initialized"] != true || postLogoutStatus["authenticated"] != false {
+		t.Fatalf("post-logout auth state=%+v", postLogoutStatus)
+	}
 
 	resp, err = client.Post(ts.URL+"/api/auth/login", "application/json", bytes.NewReader(authBody))
 	if err != nil || resp.StatusCode != http.StatusOK {

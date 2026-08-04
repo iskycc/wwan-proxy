@@ -76,7 +76,7 @@ func (s *Server) settingsResponse(settings config.SystemSettings) settingsRespon
 		CurrentWebListen:    s.http.Addr,
 		CurrentDatabasePath: s.store.Path(),
 		StartupDatabasePath: s.store.BootstrapPath(),
-		RestartRequired:     settings.WebListen != s.http.Addr || filepath.Clean(settings.DatabasePath) != s.store.Path(),
+		RestartRequired:     settings.WebListen != s.startupWebListen || filepath.Clean(settings.DatabasePath) != s.startupDatabasePath,
 	}
 }
 

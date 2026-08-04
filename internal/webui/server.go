@@ -25,18 +25,24 @@ import (
 var assets embed.FS
 
 type Server struct {
-	store   *store.Store
-	manager *manager.Manager
-	log     *slog.Logger
-	started time.Time
-	http    *http.Server
-	limiter *loginLimiter
+	store               *store.Store
+	manager             *manager.Manager
+	log                 *slog.Logger
+	started             time.Time
+	http                *http.Server
+	limiter             *loginLimiter
+	startupWebListen    string
+	startupDatabasePath string
 	// initialLiveHeap keeps the dashboard stable until the runtime completes its first GC cycle.
 	initialLiveHeap atomic.Uint64
 }
 
 func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Logger) *Server {
-	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter()}
+	startupWebListen := address
+	if settings, err := st.SystemSettings(context.Background()); err == nil {
+		startupWebListen = settings.WebListen
+	}
+	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/initialize", s.initializeAdmin)

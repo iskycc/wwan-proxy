@@ -52,7 +52,7 @@ GitHub Actions 会在每次提交到 `main` 后自动执行以下流程：
 1. 运行 `go vet ./...` 和 `go test -race ./...`；
 2. 使用 CGO 构建 Linux amd64、Linux arm64，以及不依赖 glibc 的 amd64 musl 静态版本；
 3. 打包二进制、README 和 systemd 服务文件；
-4. 创建名为 `build-<12 位提交 SHA>` 的预发布 Release，并附带 `SHA256SUMS`。
+4. 创建名为 `build-<12 位提交 SHA>` 的正式 Release，并附带 `SHA256SUMS`。
 
 也可以在仓库的 Actions 页面手动运行同一流程。重复运行同一提交时会更新原 Release 的附件，不会创建重复标签。
 

@@ -90,7 +90,7 @@
 
       <section class="page" id="page-logs">
         <div class="panel glass-card">
-          <div class="panel-head log-head"><div><p class="eyebrow">PERSISTENT EVENTS</p><h3>运行日志</h3></div><div class="log-filters"><select id="log-level"><option>ALL</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option></select><input id="log-search" placeholder="搜索消息、实例或错误原因"><button class="secondary-button" id="log-refresh">刷新</button></div></div>
+          <div class="panel-head log-head"><div><p class="eyebrow">PERSISTENT EVENTS</p><h3>运行日志</h3></div><div class="log-filters"><select class="native-select" id="log-level"><option>ALL</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option></select><input id="log-search" placeholder="搜索消息、实例或错误原因"><button class="secondary-button" id="log-refresh">刷新</button></div></div>
           <div class="log-list" id="log-list"><div class="empty-state">暂无日志</div></div>
         </div>
       </section>
@@ -148,10 +148,10 @@
         <label>空闲超时<input name="idle_timeout" value="5m"></label>
         <label>SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
         <div class="form-section-heading span-2"><i>02</i><div><strong>访问认证</strong><span>SOCKS5 与 HTTP Proxy 共用访问凭据</span></div></div>
-        <label>认证方式<select name="auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
+        <label>认证方式<select class="native-select" name="auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
         <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'></label>
         <div class="form-section-heading span-2"><i>03</i><div><strong>名称解析</strong><span>系统 DNS、传统 DNS 或绑定接口的 DoH</span></div></div>
-        <label>DNS 模式<select name="dns_mode"><option value="system">系统 DNS</option><option value="servers">传统 DNS</option><option value="doh">DoH</option></select></label>
+        <label>DNS 模式<select class="native-select" name="dns_mode"><option value="system">系统 DNS</option><option value="servers">传统 DNS</option><option value="doh">DoH</option></select></label>
         <label class="span-2 dns-servers-field">DNS 服务器<input name="dns_servers" placeholder="1.1.1.1:53, 8.8.8.8:53"></label>
         <label class="span-2 doh-field">DoH URL<input name="doh_url" placeholder="https://cloudflare-dns.com/dns-query"></label>
         <label class="span-2 doh-field">DoH Bootstrap IP<input name="doh_bootstrap" placeholder="1.1.1.1, 1.0.0.1"></label>
@@ -174,6 +174,15 @@
       <div class="form-error" id="form-error"></div>
       <div class="modal-actions"><button type="button" class="danger-button hidden" id="delete-button">删除配置</button><span></span><button type="button" class="secondary-button" id="cancel-button">取消</button><button type="submit" class="primary-button">保存并应用</button></div>
     </form>
+  </div>
+  <div class="confirm-backdrop" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="confirm-card glass-card">
+      <div class="confirm-icon">!</div>
+      <p class="eyebrow">CONFIRM ACTION</p>
+      <h3 id="confirm-title">确认操作</h3>
+      <p id="confirm-message">此操作需要确认。</p>
+      <div class="confirm-actions"><button type="button" class="secondary-button" id="confirm-cancel">取消</button><button type="button" class="danger-confirm" id="confirm-accept">确认</button></div>
+    </div>
   </div>
   <div class="toast" id="toast"></div>
   <script src="/app.js" defer></script>

@@ -56,3 +56,33 @@ func TestFrontendExposesHTTPProxyConfigurationAndMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestFrontendUsesCustomSelectsAndReliableAuthVisibility(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssContent, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, css, html := string(jsContent), string(cssContent), string(htmlContent)
+	for _, check := range []string{"initCustomSelects()", "role','combobox", "aria-selected", "syncCustomSelects()"} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("custom select behavior %q is missing", check)
+		}
+	}
+	if strings.Count(html, "<select") != strings.Count(html, "<select class=\"native-select\"") {
+		t.Fatal("every native select must be hidden and replaced by the custom component")
+	}
+	if !strings.Contains(css, ".hidden{display:none!important}") || !strings.Contains(css, ".custom-select-menu") {
+		t.Fatal("overlay visibility or custom select styling is missing")
+	}
+	if strings.Contains(js, "confirm('") || !strings.Contains(js, "confirmAction(") || !strings.Contains(html, "id=\"confirm-modal\"") {
+		t.Fatal("native browser confirmation must be replaced by the styled dialog")
+	}
+}

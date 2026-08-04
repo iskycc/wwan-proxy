@@ -162,6 +162,5 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
               --title "${release_title}" \
-              --generate-notes \
-              --prerelease
+              --generate-notes
           fi
