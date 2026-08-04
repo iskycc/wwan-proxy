@@ -10,7 +10,19 @@
 <body class="auth-pending">
   <div class="network-progress" id="network-progress"><span></span></div>
   <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
-  <div class="boot-screen" id="boot-screen"><div class="boot-mark">W</div><span>正在验证本地会话</span><i></i></div>
+  <div class="boot-screen" id="boot-screen" aria-live="polite">
+    <div class="boot-glow boot-glow-one"></div><div class="boot-glow boot-glow-two"></div>
+    <div class="boot-stage">
+      <div class="boot-orbit boot-orbit-one"><i></i><i></i></div>
+      <div class="boot-orbit boot-orbit-two"><i></i><i></i><i></i></div>
+      <div class="boot-mark"><span>W</span><i></i></div>
+    </div>
+    <div class="boot-copy">
+      <strong>正在建立安全会话</strong>
+      <div class="boot-status"><span>验证本地登录凭据</span><span>同步控制台安全状态</span><span>准备实时数据通道</span></div>
+    </div>
+    <div class="boot-progress"><i></i></div>
+  </div>
   <section class="auth-screen" id="auth-screen">
     <div class="auth-visual">
       <div class="auth-rings"><div class="auth-logo">W</div><i></i><i></i><i></i></div>
