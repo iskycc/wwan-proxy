@@ -210,9 +210,9 @@ HTTPS socket 在连接前绑定该实例的 `interface`。成功结果保存延�
 
 WebUI 可选择系统 DNS、传统 DNS或 DoH。传统 DNS socket 和 DoH HTTPS socket 都绑定实例的 WWAN 接口。
 
-DoH URL 使用域名时必须提供 `bootstrap_ips`，避免先使用系统 DNS解析 DoH 域名。程序直连引导 IP，但 TLS SNI、证书校验和 HTTP Host 仍使用 DoH URL 域名。多个引导 IP 会轮换；TCP、TLS、HTTP 或响应校验任一阶段失败时，会在同一次解析的超时预算内切换其他引导 IP。A/AAAA 并发解析允许返回已经成功的地址族，不会因另一个地址族临时超时而丢弃可用结果。`doh_timeout` 可设置为 `1s`–`2m`，独立于目标 TCP 的 `connect_timeout`。
+DoH URL 使用域名时必须提供 `bootstrap_ips`。该兼容字段保存的是 bootstrap DNS 服务器（例如 `114.114.114.114`，默认端口 53），用于先解析 DoH URL 的域名，并不是 DoH 服务器的固定 A 地址。bootstrap DNS 查询、随后建立的 DoH HTTPS 连接都会绑定实例的 WWAN 接口；TLS SNI、证书校验和 HTTP Host 仍使用 DoH URL 域名。多个 bootstrap DNS 会轮换；DNS 解析、TCP、TLS、HTTP 或响应校验任一阶段失败时，会在同一次解析的超时预算内切换其他服务器。A/AAAA 并发解析允许返回已经成功的地址族，不会因另一个地址族临时超时而丢弃可用结果。`doh_timeout` 可设置为 `1s`–`2m`，独立于目标 TCP 的 `connect_timeout`。
 
-每个实例可以通过 WebUI 开启“域名仅解析 IPv4”，对应持久化字段为 `dns.ipv4_only`。开启后 SOCKS5、HTTP/HTTPS Proxy、UDP 和自定义心跳中的域名只发送 A 查询，不发送 AAAA 查询；DoH 连接也只使用 IPv4 bootstrap。IPv4-only DoH 使用直接的 RFC 8484 A 查询，不经过系统解析器的自动重试；失败日志会保留 DoH URL、实际使用的 bootstrap IP 和底层连接错误。客户端直接提供的 IPv6 字面地址不会经过域名解析，因此不受此开关影响。
+每个实例可以通过 WebUI 开启“域名仅解析 IPv4”，对应持久化字段为 `dns.ipv4_only`。开启后 SOCKS5、HTTP/HTTPS Proxy、UDP 和自定义心跳中的域名只发送 A 查询，不发送 AAAA 查询；DoH URL 的域名也只通过 bootstrap DNS 请求 A 记录。IPv4-only DoH 使用直接的 RFC 8484 A 查询，不经过系统解析器的自动重试；失败日志会保留 DoH URL、实际使用的 bootstrap DNS、DoH 端点地址和底层错误。客户端直接提供的 IPv6 字面地址不会经过域名解析，因此不受此开关影响。
 
 ## UDP relay
 

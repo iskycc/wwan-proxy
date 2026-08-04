@@ -70,7 +70,7 @@ func TestCustomUDPRangeAndHeartbeatValidation(t *testing.T) {
 	}
 }
 
-func TestDoHDomainRequiresBootstrapIP(t *testing.T) {
+func TestDoHDomainRequiresBootstrapDNS(t *testing.T) {
 	cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{DoH: &DoH{URL: "https://dns.example/dns-query"}}}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error")
@@ -88,15 +88,29 @@ func TestDoHTimeoutRange(t *testing.T) {
 	}
 }
 
-func TestIPv4OnlyDoHRequiresIPv4Bootstrap(t *testing.T) {
-	tests := []DoH{
-		{URL: "https://dns.example/dns-query", BootstrapIPs: []string{"2001:db8::53"}, Timeout: Duration(time.Second)},
-		{URL: "https://[2001:db8::53]/dns-query", Timeout: Duration(time.Second)},
+func TestIPv4OnlyDoHRejectsIPv6EndpointLiteral(t *testing.T) {
+	doh := DoH{URL: "https://[2001:db8::53]/dns-query", Timeout: Duration(time.Second)}
+	cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{IPv4Only: true, DoH: &doh}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "IPv6") {
+		t.Fatalf("DoH=%+v err=%v", doh, err)
 	}
-	for _, doh := range tests {
-		cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{IPv4Only: true, DoH: &doh}}
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "IPv") {
-			t.Fatalf("DoH=%+v err=%v", doh, err)
+}
+
+func TestNormalizeBootstrapDNSAddress(t *testing.T) {
+	tests := map[string]string{
+		"114.114.114.114":     "114.114.114.114:53",
+		"[2001:db8::53]:5353": "[2001:db8::53]:5353",
+		"127.0.0.1:1053":      "127.0.0.1:1053",
+	}
+	for input, want := range tests {
+		got, err := NormalizeBootstrapDNSAddress(input)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeBootstrapDNSAddress(%q)=%q, %v; want %q", input, got, err, want)
+		}
+	}
+	for _, invalid := range []string{"dns.example", "127.0.0.1:0", "127.0.0.1:65536"} {
+		if _, err := NormalizeBootstrapDNSAddress(invalid); err == nil {
+			t.Fatalf("invalid bootstrap DNS %q accepted", invalid)
 		}
 	}
 }

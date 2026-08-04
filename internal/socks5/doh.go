@@ -31,25 +31,19 @@ type dohResolver struct {
 }
 
 type dohUpstream struct {
-	bootstrap string
-	client    *http.Client
-	transport *http.Transport
+	bootstrapDNS string
+	client       *http.Client
+	transport    *http.Transport
 }
 
 func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 	u, _ := url.Parse(cfg.URL)
-	bootstrap := append([]string(nil), cfg.BootstrapIPs...)
-	if len(bootstrap) == 0 {
-		bootstrap = []string{u.Hostname()}
-	}
-	if s.cfg.DNS.IPv4Only {
-		ipv4Bootstrap := bootstrap[:0]
-		for _, ip := range bootstrap {
-			if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
-				ipv4Bootstrap = append(ipv4Bootstrap, ip)
-			}
-		}
-		bootstrap = ipv4Bootstrap
+	endpointIP := net.ParseIP(u.Hostname())
+	bootstrapDNS := append([]string(nil), cfg.BootstrapIPs...)
+	if endpointIP != nil {
+		// A literal DoH endpoint needs no bootstrap lookup, but still uses the
+		// same request/failover machinery as a named endpoint.
+		bootstrapDNS = []string{""}
 	}
 	resolverContext, resolverCancel := context.WithCancel(context.Background())
 	doh := &dohResolver{
@@ -60,8 +54,17 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 		cancel:   resolverCancel,
 	}
 	s.doh = doh
-	for _, bootstrapIP := range bootstrap {
-		ip := bootstrapIP
+	for _, configuredDNS := range bootstrapDNS {
+		dnsAddress := ""
+		label := "direct endpoint"
+		var bootstrapResolver *net.Resolver
+		if endpointIP == nil {
+			dnsAddress, _ = config.NormalizeBootstrapDNSAddress(configuredDNS)
+			label = configuredDNS
+			bootstrapResolver = &net.Resolver{PreferGo: true, StrictErrors: false, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return s.dialerWithoutResolver().DialContext(ctx, network, dnsAddress)
+			}}
+		}
 		transport := &http.Transport{
 			Proxy:                 nil,
 			ForceAttemptHTTP2:     true,
@@ -82,13 +85,24 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 				if err != nil {
 					return nil, err
 				}
-				return s.dialerWithoutResolver().DialContext(ctx, network, net.JoinHostPort(ip, port))
+				ips := []net.IP{endpointIP}
+				if endpointIP == nil {
+					lookupNetwork := "ip"
+					if s.cfg.DNS.IPv4Only {
+						lookupNetwork = "ip4"
+					}
+					ips, err = bootstrapResolver.LookupIP(ctx, lookupNetwork, u.Hostname())
+					if err != nil {
+						return nil, fmt.Errorf("bootstrap DNS %s resolve %s: %w", configuredDNS, u.Hostname(), err)
+					}
+				}
+				return s.dialDoHEndpoint(ctx, network, port, ips)
 			},
 		}
 		client := &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		}}
-		doh.upstreams = append(doh.upstreams, dohUpstream{bootstrap: ip, client: client, transport: transport})
+		doh.upstreams = append(doh.upstreams, dohUpstream{bootstrapDNS: label, client: client, transport: transport})
 	}
 	s.resolverClose = func() {
 		doh.cancel()
@@ -106,9 +120,34 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 	}}
 }
 
+func (s *Server) dialDoHEndpoint(ctx context.Context, network, port string, ips []net.IP) (net.Conn, error) {
+	if len(ips) == 0 {
+		return nil, errors.New("bootstrap DNS returned no DoH endpoint address")
+	}
+	var failures []error
+	for i, ip := range ips {
+		attemptContext, cancel := dividedAttemptContext(ctx, len(ips)-i)
+		dialNetwork := network
+		if network == "tcp" {
+			if ip.To4() != nil {
+				dialNetwork = "tcp4"
+			} else {
+				dialNetwork = "tcp6"
+			}
+		}
+		conn, err := s.dialerWithoutResolver().DialContext(attemptContext, dialNetwork, net.JoinHostPort(ip.String(), port))
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		failures = append(failures, fmt.Errorf("endpoint %s: %w", ip, err))
+	}
+	return nil, errors.Join(failures...)
+}
+
 func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 	if len(d.upstreams) == 0 {
-		return nil, errors.New("no DoH bootstrap address configured")
+		return nil, errors.New("no DoH bootstrap DNS server configured")
 	}
 	start := int((d.next.Add(1) - 1) % uint64(len(d.upstreams)))
 	var attemptErrors []error
@@ -120,7 +159,7 @@ func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 		if err == nil {
 			return answer, nil
 		}
-		attemptErrors = append(attemptErrors, fmt.Errorf("bootstrap %s: %w", upstream.bootstrap, err))
+		attemptErrors = append(attemptErrors, fmt.Errorf("bootstrap DNS %s: %w", upstream.bootstrapDNS, err))
 		if ctx.Err() != nil {
 			break
 		}

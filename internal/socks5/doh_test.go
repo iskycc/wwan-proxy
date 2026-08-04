@@ -17,8 +17,9 @@ import (
 	"wwan-proxy/internal/config"
 )
 
-func TestDoHUsesBootstrapAddress(t *testing.T) {
+func TestDoHResolvesEndpointThroughBootstrapDNS(t *testing.T) {
 	var requests atomic.Int32
+	bootstrapAddress, bootstrapQueries := startBootstrapDNS(t, [4]byte{127, 0, 0, 1})
 	dohServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/dns-message" {
@@ -47,9 +48,10 @@ func TestDoHUsesBootstrapAddress(t *testing.T) {
 	u.Host = "resolver.invalid:" + u.Port()
 	u.Path = "/dns-query"
 	srv := New(config.Server{DNS: config.DNS{DoH: &config.DoH{
-		URL: u.String(), BootstrapIPs: []string{"127.0.0.1"},
+		URL: u.String(), BootstrapIPs: []string{bootstrapAddress},
 		Timeout: config.Duration(2 * time.Second), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -62,6 +64,9 @@ func TestDoHUsesBootstrapAddress(t *testing.T) {
 	}
 	if requests.Load() == 0 {
 		t.Fatal("DoH server was not used")
+	}
+	if bootstrapQueries.total.Load() == 0 {
+		t.Fatal("DoH endpoint was not resolved through the bootstrap DNS server")
 	}
 }
 
@@ -101,8 +106,10 @@ func TestDoHFailsOverAfterTLSFailure(t *testing.T) {
 	}()
 	u.Host = "resolver.invalid:" + u.Port()
 	u.Path = "/dns-query"
+	badBootstrap, _ := startBootstrapDNS(t, [4]byte{127, 0, 0, 2})
+	goodBootstrap, _ := startBootstrapDNS(t, [4]byte{127, 0, 0, 1})
 	srv := New(config.Server{DNS: config.DNS{DoH: &config.DoH{
-		URL: u.String(), BootstrapIPs: []string{"127.0.0.2", "127.0.0.1"},
+		URL: u.String(), BootstrapIPs: []string{badBootstrap, goodBootstrap},
 		Timeout: config.Duration(2 * time.Second), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer srv.Close()
@@ -149,8 +156,9 @@ func TestDoHReturnsIPv4WhenParallelIPv6QueryTimesOut(t *testing.T) {
 	}
 	u.Host = "resolver.invalid:" + u.Port()
 	u.Path = "/dns-query"
+	bootstrapAddress, _ := startBootstrapDNS(t, [4]byte{127, 0, 0, 1})
 	srv := New(config.Server{DNS: config.DNS{DoH: &config.DoH{
-		URL: u.String(), BootstrapIPs: []string{"127.0.0.1"},
+		URL: u.String(), BootstrapIPs: []string{bootstrapAddress},
 		Timeout: config.Duration(100 * time.Millisecond), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer srv.Close()
@@ -222,6 +230,7 @@ func TestIPv4OnlyDialDoesNotSendAAAAQuery(t *testing.T) {
 	}
 	u.Host = "resolver.invalid:" + u.Port()
 	u.Path = "/dns-query"
+	bootstrapAddress, bootstrapQueries := startBootstrapDNS(t, [4]byte{127, 0, 0, 1})
 	target, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +244,7 @@ func TestIPv4OnlyDialDoesNotSendAAAAQuery(t *testing.T) {
 		}
 	}()
 	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
-		URL: u.String(), BootstrapIPs: []string{"127.0.0.1"},
+		URL: u.String(), BootstrapIPs: []string{bootstrapAddress},
 		Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer srv.Close()
@@ -263,21 +272,24 @@ func TestIPv4OnlyDialDoesNotSendAAAAQuery(t *testing.T) {
 	if got := aaaaRequests.Load(); got != 0 {
 		t.Fatalf("IPv4-only dial issued %d AAAA queries", got)
 	}
+	if bootstrapQueries.a.Load() == 0 {
+		t.Fatal("IPv4-only DoH endpoint did not use bootstrap DNS")
+	}
+	if got := bootstrapQueries.aaaa.Load(); got != 0 {
+		t.Fatalf("IPv4-only DoH endpoint issued %d bootstrap AAAA queries", got)
+	}
 }
 
-func TestIPv4OnlyDoHPreservesEndpointAndBootstrapError(t *testing.T) {
-	closedListener, err := net.Listen("tcp4", "127.0.0.1:0")
+func TestIPv4OnlyDoHPreservesEndpointAndBootstrapDNSError(t *testing.T) {
+	closedListener, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, port, err := net.SplitHostPort(closedListener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	bootstrapAddress := closedListener.LocalAddr().String()
 	_ = closedListener.Close()
-	endpoint := "https://resolver.invalid:" + port + "/dns-query"
+	endpoint := "https://resolver.invalid/dns-query"
 	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
-		URL: endpoint, BootstrapIPs: []string{"127.0.0.1"}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+		URL: endpoint, BootstrapIPs: []string{bootstrapAddress}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -287,11 +299,53 @@ func TestIPv4OnlyDoHPreservesEndpointAndBootstrapError(t *testing.T) {
 		t.Fatal("expected DoH failure")
 	}
 	message := err.Error()
-	for _, detail := range []string{"DoH " + endpoint, "bootstrap 127.0.0.1", "resolve IPv4 example.test"} {
+	for _, detail := range []string{"DoH " + endpoint, "bootstrap DNS " + bootstrapAddress, "resolve resolver.invalid", "resolve IPv4 example.test"} {
 		if !strings.Contains(message, detail) {
 			t.Fatalf("detailed DoH error is missing %q: %v", detail, err)
 		}
 	}
+}
+
+type bootstrapDNSCounts struct {
+	total atomic.Int32
+	a     atomic.Int32
+	aaaa  atomic.Int32
+}
+
+func startBootstrapDNS(t *testing.T, ip [4]byte) (string, *bootstrapDNSCounts) {
+	t.Helper()
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	var queries bootstrapDNSCounts
+	go func() {
+		packet := make([]byte, 4096)
+		for {
+			n, peer, readErr := conn.ReadFrom(packet)
+			if readErr != nil {
+				return
+			}
+			queryType, queryErr := dnsTestQueryType(packet[:n])
+			if queryErr != nil {
+				continue
+			}
+			response, responseErr := dnsTestResponseIPv4(packet[:n], ip)
+			if responseErr != nil {
+				continue
+			}
+			queries.total.Add(1)
+			switch queryType {
+			case 1:
+				queries.a.Add(1)
+			case 28:
+				queries.aaaa.Add(1)
+			}
+			_, _ = conn.WriteTo(response, peer)
+		}
+	}()
+	return conn.LocalAddr().String(), &queries
 }
 
 func dnsTestResponse(query []byte) ([]byte, error) {

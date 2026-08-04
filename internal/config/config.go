@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -235,23 +236,14 @@ func (s *Server) Validate() error {
 		if net.ParseIP(u.Hostname()) == nil && len(doh.BootstrapIPs) == 0 {
 			return fmt.Errorf("dns.doh.bootstrap_ips is required when the URL uses a domain")
 		}
-		for i, ip := range doh.BootstrapIPs {
-			if net.ParseIP(ip) == nil {
-				return fmt.Errorf("dns.doh.bootstrap_ips[%d] must be an IP address", i)
+		for i, server := range doh.BootstrapIPs {
+			if _, err := NormalizeBootstrapDNSAddress(server); err != nil {
+				return fmt.Errorf("dns.doh.bootstrap_ips[%d]: %w", i, err)
 			}
 		}
 		if s.DNS.IPv4Only {
 			if endpointIP := net.ParseIP(u.Hostname()); endpointIP != nil && endpointIP.To4() == nil {
 				return fmt.Errorf("dns.doh.url cannot use an IPv6 literal when dns.ipv4_only is enabled")
-			}
-			if net.ParseIP(u.Hostname()) == nil {
-				hasIPv4Bootstrap := false
-				for _, ip := range doh.BootstrapIPs {
-					hasIPv4Bootstrap = hasIPv4Bootstrap || net.ParseIP(ip).To4() != nil
-				}
-				if !hasIPv4Bootstrap {
-					return fmt.Errorf("dns.doh.bootstrap_ips must include an IPv4 address when dns.ipv4_only is enabled")
-				}
 			}
 		}
 		if time.Duration(doh.Timeout) < time.Second || time.Duration(doh.Timeout) > 2*time.Minute {
@@ -283,4 +275,22 @@ func (s *Server) Validate() error {
 		return fmt.Errorf("heartbeat.timeout must be between 1s and heartbeat.interval")
 	}
 	return nil
+}
+
+// NormalizeBootstrapDNSAddress accepts an IP literal with an optional port.
+// Bootstrap values are traditional DNS servers, not fixed addresses for the
+// DoH HTTPS endpoint.
+func NormalizeBootstrapDNSAddress(server string) (string, error) {
+	if ip := net.ParseIP(server); ip != nil {
+		return net.JoinHostPort(ip.String(), "53"), nil
+	}
+	host, port, err := net.SplitHostPort(server)
+	if err != nil || net.ParseIP(host) == nil {
+		return "", fmt.Errorf("must be a DNS server IP with optional port")
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return "", fmt.Errorf("must use a port between 1 and 65535")
+	}
+	return net.JoinHostPort(net.ParseIP(host).String(), port), nil
 }
