@@ -59,6 +59,7 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 		context:  resolverContext,
 		cancel:   resolverCancel,
 	}
+	s.doh = doh
 	for _, bootstrapIP := range bootstrap {
 		ip := bootstrapIP
 		transport := &http.Transport{
@@ -125,6 +126,124 @@ func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("DoH %s failed: %w", d.endpoint, errors.Join(attemptErrors...))
+}
+
+func (d *dohResolver) lookupIPv4(parent context.Context, host string) ([]net.IP, error) {
+	query, err := buildDNSAQuery(host)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(parent, d.timeout)
+	defer cancel()
+	response, err := d.query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("resolve IPv4 %s via DoH: %w", host, err)
+	}
+	ips, err := parseDNSAResponse(response, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve IPv4 %s via DoH: %w", host, err)
+	}
+	return ips, nil
+}
+
+func buildDNSAQuery(host string) ([]byte, error) {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" || len(host) > 253 {
+		return nil, fmt.Errorf("invalid DNS name %q", host)
+	}
+	wire := make([]byte, 12, 12+len(host)+6)
+	binary.BigEndian.PutUint16(wire[2:4], 0x0100) // Recursion Desired; RFC 8484 recommends an ID of zero.
+	binary.BigEndian.PutUint16(wire[4:6], 1)
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return nil, fmt.Errorf("invalid DNS name %q", host)
+		}
+		wire = append(wire, byte(len(label)))
+		wire = append(wire, label...)
+	}
+	wire = append(wire, 0, 0, 1, 0, 1) // root label, A, IN
+	return wire, nil
+}
+
+func parseDNSAResponse(wire []byte, host string) ([]net.IP, error) {
+	if len(wire) < 12 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	flags := binary.BigEndian.Uint16(wire[2:4])
+	if flags&0x8000 == 0 {
+		return nil, errors.New("DoH response is not a DNS response")
+	}
+	if flags&0x0200 != 0 {
+		return nil, errors.New("truncated DoH response")
+	}
+	rcode := flags & 0x000f
+	if rcode == 3 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	if rcode != 0 {
+		return nil, fmt.Errorf("DoH DNS response code %d", rcode)
+	}
+	offset := 12
+	questionCount := int(binary.BigEndian.Uint16(wire[4:6]))
+	answerCount := int(binary.BigEndian.Uint16(wire[6:8]))
+	for range questionCount {
+		var err error
+		offset, err = skipDNSName(wire, offset)
+		if err != nil || offset+4 > len(wire) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		offset += 4
+	}
+	result := make([]net.IP, 0, answerCount)
+	for range answerCount {
+		var err error
+		offset, err = skipDNSName(wire, offset)
+		if err != nil || offset+10 > len(wire) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		recordType := binary.BigEndian.Uint16(wire[offset : offset+2])
+		recordClass := binary.BigEndian.Uint16(wire[offset+2 : offset+4])
+		dataLength := int(binary.BigEndian.Uint16(wire[offset+8 : offset+10]))
+		offset += 10
+		if offset+dataLength > len(wire) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		if recordType == 1 && recordClass == 1 && dataLength == net.IPv4len {
+			result = append(result, net.IPv4(wire[offset], wire[offset+1], wire[offset+2], wire[offset+3]))
+		}
+		offset += dataLength
+	}
+	if len(result) == 0 {
+		return nil, &net.DNSError{Err: "no IPv4 address", Name: host, IsNotFound: true}
+	}
+	return result, nil
+}
+
+func skipDNSName(wire []byte, offset int) (int, error) {
+	for labels := 0; labels <= 127; labels++ {
+		if offset >= len(wire) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		length := int(wire[offset])
+		if length&0xc0 == 0xc0 {
+			if offset+2 > len(wire) {
+				return 0, io.ErrUnexpectedEOF
+			}
+			return offset + 2, nil
+		}
+		if length&0xc0 != 0 {
+			return 0, errors.New("invalid compressed DNS name")
+		}
+		offset++
+		if length == 0 {
+			return offset, nil
+		}
+		if offset+length > len(wire) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		offset += length
+	}
+	return 0, errors.New("too many DNS labels")
 }
 
 func dividedAttemptContext(ctx context.Context, remainingAttempts int) (context.Context, context.CancelFunc) {

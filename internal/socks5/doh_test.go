@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -261,6 +262,35 @@ func TestIPv4OnlyDialDoesNotSendAAAAQuery(t *testing.T) {
 	}
 	if got := aaaaRequests.Load(); got != 0 {
 		t.Fatalf("IPv4-only dial issued %d AAAA queries", got)
+	}
+}
+
+func TestIPv4OnlyDoHPreservesEndpointAndBootstrapError(t *testing.T) {
+	closedListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(closedListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closedListener.Close()
+	endpoint := "https://resolver.invalid:" + port + "/dns-query"
+	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
+		URL: endpoint, BootstrapIPs: []string{"127.0.0.1"}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = srv.DialContext(ctx, "tcp", "example.test:443")
+	if err == nil {
+		t.Fatal("expected DoH failure")
+	}
+	message := err.Error()
+	for _, detail := range []string{"DoH " + endpoint, "bootstrap 127.0.0.1", "resolve IPv4 example.test"} {
+		if !strings.Contains(message, detail) {
+			t.Fatalf("detailed DoH error is missing %q: %v", detail, err)
+		}
 	}
 }
 

@@ -28,6 +28,7 @@ type Server struct {
 	log      *slog.Logger
 	listener net.Listener
 	resolver *net.Resolver
+	doh      *dohResolver
 	// resolverClose releases persistent DoH connections during hot reload and shutdown.
 	resolverClose func()
 
@@ -287,7 +288,7 @@ func (s *Server) DialContext(parent context.Context, network, address string) (n
 	}
 	ctx, cancel := context.WithTimeout(parent, dialer.Timeout)
 	defer cancel()
-	ips, err := s.resolver.LookupIP(ctx, "ip4", host)
+	ips, err := s.lookupIPv4(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("lookup IPv4 %s: %w", host, err)
 	}
@@ -310,6 +311,13 @@ func (s *Server) DialContext(parent context.Context, network, address string) (n
 		failures = append(failures, fmt.Errorf("%s: %w", ip, dialErr))
 	}
 	return nil, fmt.Errorf("connect %s using IPv4: %w", address, errors.Join(failures...))
+}
+
+func (s *Server) lookupIPv4(ctx context.Context, host string) ([]net.IP, error) {
+	if s.doh != nil {
+		return s.doh.lookupIPv4(ctx, host)
+	}
+	return s.resolver.LookupIP(ctx, "ip4", host)
 }
 
 func (s *Server) resolutionTimeout() time.Duration {

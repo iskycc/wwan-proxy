@@ -160,7 +160,7 @@ func (a *udpAssociation) resolve(dst address) (*net.UDPAddr, error) {
 	var ips []net.IPAddr
 	var err error
 	if a.server.cfg.DNS.IPv4Only {
-		resolved, lookupErr := a.server.resolver.LookupIP(ctx, "ip4", dst.Host)
+		resolved, lookupErr := a.server.lookupIPv4(ctx, dst.Host)
 		err = lookupErr
 		for _, ip := range resolved {
 			ips = append(ips, net.IPAddr{IP: ip})
