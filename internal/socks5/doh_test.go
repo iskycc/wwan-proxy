@@ -3,6 +3,7 @@ package socks5
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -306,6 +308,223 @@ func TestIPv4OnlyDoHPreservesEndpointAndBootstrapDNSError(t *testing.T) {
 	}
 }
 
+func TestDoHProvidersRaceAndFastestValidResponseWins(t *testing.T) {
+	var slowRequests atomic.Int32
+	var fastRequests atomic.Int32
+	var invalidRequests atomic.Int32
+	newProvider := func(delay time.Duration, ip [4]byte, requests *atomic.Int32) *httptest.Server {
+		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			query, _ := io.ReadAll(r.Body)
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				return
+			}
+			answer, err := dnsTestResponseIPv4(query, ip)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/dns-message")
+			_, _ = w.Write(answer)
+		}))
+	}
+	slow := newProvider(300*time.Millisecond, [4]byte{192, 0, 2, 10}, &slowRequests)
+	defer slow.Close()
+	fast := newProvider(15*time.Millisecond, [4]byte{192, 0, 2, 20}, &fastRequests)
+	defer fast.Close()
+	invalid := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		invalidRequests.Add(1)
+		query, _ := io.ReadAll(r.Body)
+		answer, _ := dnsTestResponseIPv4(query, [4]byte{192, 0, 2, 99})
+		binary.BigEndian.PutUint16(answer[2:4], 0x8182) // SERVFAIL must not win the race.
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(answer)
+	}))
+	defer invalid.Close()
+	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
+		URLs: []string{slow.URL, invalid.URL, fast.URL}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+	started := time.Now()
+	ips, err := srv.doh.lookupIPv4(context.Background(), "race.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 || !ips[0].Equal(net.IPv4(192, 0, 2, 20)) {
+		t.Fatalf("fast provider did not win: %v", ips)
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("provider requests were not raced: %v", elapsed)
+	}
+	// The losing slow request may be canceled during TLS before its HTTP
+	// handler runs. The immediate invalid provider and valid provider must both
+	// be observed, proving an invalid fast response does not terminate the race.
+	if invalidRequests.Load() != 1 || fastRequests.Load() != 1 || slowRequests.Load() > 1 {
+		t.Fatalf("unexpected provider requests: slow=%d invalid=%d fast=%d", slowRequests.Load(), invalidRequests.Load(), fastRequests.Load())
+	}
+}
+
+func TestDoHNegativeCacheUsesSOAMinimumTTL(t *testing.T) {
+	query, err := buildDNSAQuery("missing.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := dnsTestNXDomainResponse(query, 120, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ttl, err := dnsResponseCacheTTL(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl != 30 {
+		t.Fatalf("negative cache TTL=%d, want min(SOA TTL 120, SOA.MINIMUM 30)", ttl)
+	}
+}
+
+func TestDoHNegativeResponseIsCached(t *testing.T) {
+	var requests atomic.Int32
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		query, _ := io.ReadAll(r.Body)
+		response, _ := dnsTestNXDomainResponse(query, 120, 30)
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(response)
+	}))
+	defer provider.Close()
+	srv := New(config.Server{DNS: config.DNS{DoH: &config.DoH{
+		URLs: []string{provider.URL}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+	query, _ := buildDNSAQuery("negative-cache.test")
+	for range 2 {
+		response, err := srv.doh.query(context.Background(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if binary.BigEndian.Uint16(response[2:4])&0x000f != 3 {
+			t.Fatal("cached response lost NXDOMAIN RCODE")
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("negative response made %d requests, want 1", requests.Load())
+	}
+}
+
+func TestDoHCacheUsesTTLAndRewritesQueryID(t *testing.T) {
+	var requests atomic.Int32
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		query, _ := io.ReadAll(r.Body)
+		answer, err := dnsTestResponseIPv4TTL(query, [4]byte{192, 0, 2, 30}, 60)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(answer)
+	}))
+	defer provider.Close()
+	srv := New(config.Server{DNS: config.DNS{DoH: &config.DoH{
+		URLs: []string{provider.URL}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+	query, err := buildDNSAQuery("cache.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary.BigEndian.PutUint16(query[:2], 100)
+	first, err := srv.doh.query(context.Background(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _, _ := dnsCacheKey(query)
+	srv.doh.cacheMu.Lock()
+	entry := srv.doh.cache[key]
+	entry.storedAt = entry.storedAt.Add(-2 * time.Second)
+	srv.doh.cache[key] = entry
+	srv.doh.cacheMu.Unlock()
+	secondQuery, _ := buildDNSAQuery("CaChE.TeSt")
+	binary.BigEndian.PutUint16(secondQuery[:2], 200)
+	second, err := srv.doh.query(context.Background(), secondQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("unexpired result was queried again: requests=%d", requests.Load())
+	}
+	if binary.BigEndian.Uint16(second[:2]) != 200 {
+		t.Fatalf("cached response ID=%d, want 200", binary.BigEndian.Uint16(second[:2]))
+	}
+	firstLayout, _ := parseDNSLayout(first)
+	secondLayout, _ := parseDNSLayout(second)
+	if secondLayout.questions[0].name != "CaChE.TeSt" {
+		t.Fatalf("cached response question=%q, want current query capitalization", secondLayout.questions[0].name)
+	}
+	if firstLayout.answers[0].ttl != 60 || secondLayout.answers[0].ttl != 58 {
+		t.Fatalf("TTL was not aged: first=%d second=%d", firstLayout.answers[0].ttl, secondLayout.answers[0].ttl)
+	}
+	srv.doh.cacheMu.Lock()
+	entry = srv.doh.cache[key]
+	entry.expires = time.Now().Add(-time.Second)
+	srv.doh.cache[key] = entry
+	srv.doh.cacheMu.Unlock()
+	if _, err = srv.doh.query(context.Background(), secondQuery); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("expired result was not refreshed: requests=%d", requests.Load())
+	}
+}
+
+func TestDoHCacheCoalescesConcurrentMisses(t *testing.T) {
+	var requests atomic.Int32
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		query, _ := io.ReadAll(r.Body)
+		time.Sleep(40 * time.Millisecond)
+		answer, _ := dnsTestResponseIPv4(query, [4]byte{192, 0, 2, 40})
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(answer)
+	}))
+	defer provider.Close()
+	srv := New(config.Server{DNS: config.DNS{DoH: &config.DoH{
+		URLs: []string{provider.URL}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+	query, _ := buildDNSAQuery("coalesce.test")
+	start := make(chan struct{})
+	errorsSeen := make(chan error, 32)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			localQuery := append([]byte(nil), query...)
+			binary.BigEndian.PutUint16(localQuery[:2], uint16(id+1))
+			response, err := srv.doh.query(context.Background(), localQuery)
+			if err == nil && binary.BigEndian.Uint16(response[:2]) != uint16(id+1) {
+				err = errors.New("coalesced response used another query ID")
+			}
+			errorsSeen <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("concurrent cache misses made %d upstream requests, want 1", requests.Load())
+	}
+}
+
 type bootstrapDNSCounts struct {
 	total atomic.Int32
 	a     atomic.Int32
@@ -353,6 +572,10 @@ func dnsTestResponse(query []byte) ([]byte, error) {
 }
 
 func dnsTestResponseIPv4(query []byte, ip [4]byte) ([]byte, error) {
+	return dnsTestResponseIPv4TTL(query, ip, 60)
+}
+
+func dnsTestResponseIPv4TTL(query []byte, ip [4]byte, ttl uint32) ([]byte, error) {
 	qtype, questionEnd, err := dnsTestQuestion(query)
 	if err != nil {
 		return nil, err
@@ -366,8 +589,29 @@ func dnsTestResponseIPv4(query []byte, ip [4]byte) ([]byte, error) {
 		return resp, nil
 	}
 	binary.BigEndian.PutUint16(resp[6:8], 1)
-	resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, ip[0], ip[1], ip[2], ip[3])
+	resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1)
+	resp = binary.BigEndian.AppendUint32(resp, ttl)
+	resp = append(resp, 0, 4, ip[0], ip[1], ip[2], ip[3])
 	return resp, nil
+}
+
+func dnsTestNXDomainResponse(query []byte, soaTTL, minimum uint32) ([]byte, error) {
+	_, questionEnd, err := dnsTestQuestion(query)
+	if err != nil {
+		return nil, err
+	}
+	response := append([]byte(nil), query[:questionEnd]...)
+	binary.BigEndian.PutUint16(response[2:4], 0x8183)
+	binary.BigEndian.PutUint16(response[6:8], 0)
+	binary.BigEndian.PutUint16(response[8:10], 1)
+	binary.BigEndian.PutUint16(response[10:12], 0)
+	response = append(response, 0xc0, 0x0c, 0, 6, 0, 1)
+	response = binary.BigEndian.AppendUint32(response, soaTTL)
+	response = append(response, 0, 22, 0, 0) // RDLENGTH, root MNAME, root RNAME
+	for _, value := range []uint32{1, 2, 3, 4, minimum} {
+		response = binary.BigEndian.AppendUint32(response, value)
+	}
+	return response, nil
 }
 
 func dnsTestQueryType(query []byte) (uint16, error) {

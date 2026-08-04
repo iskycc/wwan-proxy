@@ -77,6 +77,26 @@ func TestDoHDomainRequiresBootstrapDNS(t *testing.T) {
 	}
 }
 
+func TestDoHMultipleEndpointsAndLegacyURL(t *testing.T) {
+	legacy := DoH{URL: "https://legacy.example/dns-query"}
+	if got := legacy.Endpoints(); len(got) != 1 || got[0] != legacy.URL {
+		t.Fatalf("legacy DoH URL was not preserved: %v", got)
+	}
+	doh := DoH{
+		URL:          "https://ignored.example/dns-query",
+		URLs:         []string{" https://one.example/dns-query ", "https://two.example/dns-query", "https://one.example/dns-query"},
+		BootstrapIPs: []string{"114.114.114.114"}, Timeout: Duration(time.Second),
+	}
+	got := doh.Endpoints()
+	if len(got) != 2 || got[0] != "https://one.example/dns-query" || got[1] != "https://two.example/dns-query" {
+		t.Fatalf("multiple DoH endpoints were not normalized: %v", got)
+	}
+	cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{DoH: &doh}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDoHTimeoutRange(t *testing.T) {
 	for _, timeout := range []time.Duration{time.Millisecond, 3 * time.Minute} {
 		cfg := Server{Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", DNS: DNS{DoH: &DoH{

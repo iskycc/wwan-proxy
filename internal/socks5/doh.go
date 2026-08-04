@@ -21,13 +21,20 @@ import (
 )
 
 type dohResolver struct {
-	endpoint  string
-	upstreams []dohUpstream
+	providers []*dohProvider
 	headers   map[string]string
 	timeout   time.Duration
-	next      atomic.Uint64
 	context   context.Context
 	cancel    context.CancelFunc
+	cacheMu   sync.Mutex
+	cache     map[string]dnsCacheEntry
+	inflight  map[string]*dnsFlight
+}
+
+type dohProvider struct {
+	endpoint  string
+	upstreams []dohUpstream
+	next      atomic.Uint64
 }
 
 type dohUpstream struct {
@@ -37,77 +44,85 @@ type dohUpstream struct {
 }
 
 func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
-	u, _ := url.Parse(cfg.URL)
-	endpointIP := net.ParseIP(u.Hostname())
-	bootstrapDNS := append([]string(nil), cfg.BootstrapIPs...)
-	if endpointIP != nil {
-		// A literal DoH endpoint needs no bootstrap lookup, but still uses the
-		// same request/failover machinery as a named endpoint.
-		bootstrapDNS = []string{""}
-	}
 	resolverContext, resolverCancel := context.WithCancel(context.Background())
 	doh := &dohResolver{
-		endpoint: cfg.URL,
 		headers:  cfg.Headers,
 		timeout:  cfg.Timeout.Value(10 * time.Second),
 		context:  resolverContext,
 		cancel:   resolverCancel,
+		cache:    make(map[string]dnsCacheEntry),
+		inflight: make(map[string]*dnsFlight),
 	}
 	s.doh = doh
-	for _, configuredDNS := range bootstrapDNS {
-		dnsAddress := ""
-		label := "direct endpoint"
-		var bootstrapResolver *net.Resolver
-		if endpointIP == nil {
-			dnsAddress, _ = config.NormalizeBootstrapDNSAddress(configuredDNS)
-			label = configuredDNS
-			bootstrapResolver = &net.Resolver{PreferGo: true, StrictErrors: false, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return s.dialerWithoutResolver().DialContext(ctx, network, dnsAddress)
-			}}
+	for _, endpoint := range cfg.Endpoints() {
+		u, _ := url.Parse(endpoint)
+		endpointIP := net.ParseIP(u.Hostname())
+		bootstrapDNS := append([]string(nil), cfg.BootstrapIPs...)
+		if endpointIP != nil {
+			bootstrapDNS = []string{""}
 		}
-		transport := &http.Transport{
-			Proxy:                 nil,
-			ForceAttemptHTTP2:     true,
-			DisableCompression:    true,
-			MaxIdleConns:          64,
-			MaxIdleConnsPerHost:   32,
-			MaxConnsPerHost:       64,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   min(doh.timeout, 10*time.Second),
-			ResponseHeaderTimeout: doh.timeout,
-			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS12,
-				ServerName:         u.Hostname(),
-				InsecureSkipVerify: cfg.InsecureSkipVerify, // explicitly configured for private DoH deployments
-			},
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				_, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
-				}
-				ips := []net.IP{endpointIP}
-				if endpointIP == nil {
-					lookupNetwork := "ip"
-					if s.cfg.DNS.IPv4Only {
-						lookupNetwork = "ip4"
-					}
-					ips, err = bootstrapResolver.LookupIP(ctx, lookupNetwork, u.Hostname())
+		provider := &dohProvider{endpoint: endpoint}
+		for _, configuredDNS := range bootstrapDNS {
+			dnsAddress := ""
+			label := "direct endpoint"
+			var bootstrapResolver *net.Resolver
+			if endpointIP == nil {
+				dnsAddress, _ = config.NormalizeBootstrapDNSAddress(configuredDNS)
+				label = configuredDNS
+				bootstrapResolver = &net.Resolver{PreferGo: true, StrictErrors: false, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return s.dialerWithoutResolver().DialContext(ctx, network, dnsAddress)
+				}}
+			}
+			transport := &http.Transport{
+				Proxy:                 nil,
+				ForceAttemptHTTP2:     true,
+				DisableCompression:    true,
+				MaxIdleConns:          64,
+				MaxIdleConnsPerHost:   32,
+				MaxConnsPerHost:       64,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   min(doh.timeout, 10*time.Second),
+				ResponseHeaderTimeout: doh.timeout,
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					ServerName:         u.Hostname(),
+					InsecureSkipVerify: cfg.InsecureSkipVerify, // explicitly configured for private DoH deployments
+				},
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					_, port, err := net.SplitHostPort(addr)
 					if err != nil {
-						return nil, fmt.Errorf("bootstrap DNS %s resolve %s: %w", configuredDNS, u.Hostname(), err)
+						return nil, err
 					}
-				}
-				return s.dialDoHEndpoint(ctx, network, port, ips)
-			},
+					ips := []net.IP{endpointIP}
+					if endpointIP == nil {
+						lookupNetwork := "ip"
+						if s.cfg.DNS.IPv4Only {
+							lookupNetwork = "ip4"
+						}
+						ips, err = bootstrapResolver.LookupIP(ctx, lookupNetwork, u.Hostname())
+						if err != nil {
+							return nil, fmt.Errorf("bootstrap DNS %s resolve %s: %w", configuredDNS, u.Hostname(), err)
+						}
+					}
+					return s.dialDoHEndpoint(ctx, network, port, ips)
+				},
+			}
+			client := &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			}}
+			provider.upstreams = append(provider.upstreams, dohUpstream{bootstrapDNS: label, client: client, transport: transport})
 		}
-		client := &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		}}
-		doh.upstreams = append(doh.upstreams, dohUpstream{bootstrapDNS: label, client: client, transport: transport})
+		doh.providers = append(doh.providers, provider)
 	}
 	s.resolverClose = func() {
 		doh.cancel()
-		for _, upstream := range doh.upstreams {
-			upstream.transport.CloseIdleConnections()
+		doh.cacheMu.Lock()
+		clear(doh.cache)
+		doh.cacheMu.Unlock()
+		for _, provider := range doh.providers {
+			for _, upstream := range provider.upstreams {
+				upstream.transport.CloseIdleConnections()
+			}
 		}
 	}
 	return &net.Resolver{PreferGo: true, StrictErrors: false, Dial: func(lookupContext context.Context, network, _ string) (net.Conn, error) {
@@ -146,25 +161,64 @@ func (s *Server) dialDoHEndpoint(ctx context.Context, network, port string, ips 
 }
 
 func (d *dohResolver) query(ctx context.Context, wire []byte) ([]byte, error) {
-	if len(d.upstreams) == 0 {
-		return nil, errors.New("no DoH bootstrap DNS server configured")
+	return d.cachedQuery(ctx, wire, d.raceProviders)
+}
+
+func (d *dohResolver) raceProviders(ctx context.Context, wire []byte) ([]byte, error) {
+	if len(d.providers) == 0 {
+		return nil, errors.New("no DoH provider configured")
 	}
-	start := int((d.next.Add(1) - 1) % uint64(len(d.upstreams)))
+	type result struct {
+		answer []byte
+		err    error
+	}
+	raceContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan result, len(d.providers))
+	for _, provider := range d.providers {
+		go func() {
+			answer, err := d.queryProvider(raceContext, provider, wire)
+			results <- result{answer: answer, err: err}
+		}()
+	}
 	var attemptErrors []error
-	for i := range d.upstreams {
-		upstream := d.upstreams[(start+i)%len(d.upstreams)]
-		attemptContext, cancel := dividedAttemptContext(ctx, len(d.upstreams)-i)
-		answer, err := d.queryUpstream(attemptContext, upstream, wire)
+	for range d.providers {
+		select {
+		case outcome := <-results:
+			if outcome.err == nil {
+				cancel()
+				return outcome.answer, nil
+			}
+			attemptErrors = append(attemptErrors, outcome.err)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("all DoH providers failed: %w", errors.Join(attemptErrors...))
+}
+
+func (d *dohResolver) queryProvider(ctx context.Context, provider *dohProvider, wire []byte) ([]byte, error) {
+	if len(provider.upstreams) == 0 {
+		return nil, fmt.Errorf("DoH %s has no usable bootstrap DNS server", provider.endpoint)
+	}
+	start := int((provider.next.Add(1) - 1) % uint64(len(provider.upstreams)))
+	var attemptErrors []error
+	for i := range provider.upstreams {
+		upstream := provider.upstreams[(start+i)%len(provider.upstreams)]
+		attemptContext, cancel := dividedAttemptContext(ctx, len(provider.upstreams)-i)
+		answer, err := d.queryUpstream(attemptContext, provider.endpoint, upstream, wire)
 		cancel()
 		if err == nil {
-			return answer, nil
+			if err = validateDNSResponse(wire, answer); err == nil {
+				return answer, nil
+			}
 		}
 		attemptErrors = append(attemptErrors, fmt.Errorf("bootstrap DNS %s: %w", upstream.bootstrapDNS, err))
 		if ctx.Err() != nil {
 			break
 		}
 	}
-	return nil, fmt.Errorf("DoH %s failed: %w", d.endpoint, errors.Join(attemptErrors...))
+	return nil, fmt.Errorf("DoH %s failed: %w", provider.endpoint, errors.Join(attemptErrors...))
 }
 
 func (d *dohResolver) lookupIPv4(parent context.Context, host string) ([]net.IP, error) {
@@ -297,8 +351,8 @@ func dividedAttemptContext(ctx context.Context, remainingAttempts int) (context.
 	return context.WithTimeout(ctx, remaining/time.Duration(remainingAttempts))
 }
 
-func (d *dohResolver) queryUpstream(ctx context.Context, upstream dohUpstream, wire []byte) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(wire))
+func (d *dohResolver) queryUpstream(ctx context.Context, endpoint string, upstream dohUpstream, wire []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wire))
 	if err != nil {
 		return nil, err
 	}

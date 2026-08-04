@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -75,11 +76,34 @@ type DNS struct {
 }
 
 type DoH struct {
-	URL                string            `json:"url"`
+	// URL is retained for backward compatibility with existing SQLite data.
+	URL                string            `json:"url,omitempty"`
+	URLs               []string          `json:"urls,omitempty"`
 	BootstrapIPs       []string          `json:"bootstrap_ips"`
 	Timeout            Duration          `json:"timeout"`
 	Headers            map[string]string `json:"headers,omitempty"`
 	InsecureSkipVerify bool              `json:"insecure_skip_verify"`
+}
+
+func (d DoH) Endpoints() []string {
+	values := d.URLs
+	if len(values) == 0 && d.URL != "" {
+		values = []string{d.URL}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 type UDP struct {
@@ -229,21 +253,27 @@ func (s *Server) Validate() error {
 	}
 	if s.DNS.DoH != nil {
 		doh := s.DNS.DoH
-		u, err := url.Parse(doh.URL)
-		if err != nil || u.Scheme != "https" || u.Hostname() == "" {
-			return fmt.Errorf("dns.doh.url must be a valid https URL")
+		endpoints := doh.Endpoints()
+		if len(endpoints) == 0 {
+			return fmt.Errorf("dns.doh.urls must contain at least one DoH URL")
 		}
-		if net.ParseIP(u.Hostname()) == nil && len(doh.BootstrapIPs) == 0 {
-			return fmt.Errorf("dns.doh.bootstrap_ips is required when the URL uses a domain")
+		for i, endpoint := range endpoints {
+			u, err := url.Parse(endpoint)
+			if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+				return fmt.Errorf("dns.doh.urls[%d] must be a valid https URL", i)
+			}
+			if net.ParseIP(u.Hostname()) == nil && len(doh.BootstrapIPs) == 0 {
+				return fmt.Errorf("dns.doh.bootstrap_ips is required when a DoH URL uses a domain")
+			}
+			if s.DNS.IPv4Only {
+				if endpointIP := net.ParseIP(u.Hostname()); endpointIP != nil && endpointIP.To4() == nil {
+					return fmt.Errorf("dns.doh.urls[%d] cannot use an IPv6 literal when dns.ipv4_only is enabled", i)
+				}
+			}
 		}
 		for i, server := range doh.BootstrapIPs {
 			if _, err := NormalizeBootstrapDNSAddress(server); err != nil {
 				return fmt.Errorf("dns.doh.bootstrap_ips[%d]: %w", i, err)
-			}
-		}
-		if s.DNS.IPv4Only {
-			if endpointIP := net.ParseIP(u.Hostname()); endpointIP != nil && endpointIP.To4() == nil {
-				return fmt.Errorf("dns.doh.url cannot use an IPv6 literal when dns.ipv4_only is enabled")
 			}
 		}
 		if time.Duration(doh.Timeout) < time.Second || time.Duration(doh.Timeout) > 2*time.Minute {

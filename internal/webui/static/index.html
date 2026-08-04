@@ -7,9 +7,10 @@
   <title>WWAN Control</title>
   <link rel="stylesheet" href="/app.css">
 </head>
-<body>
+<body class="auth-pending">
   <div class="network-progress" id="network-progress"><span></span></div>
   <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <div class="boot-screen" id="boot-screen"><div class="boot-mark">W</div><span>正在验证本地会话</span><i></i></div>
   <section class="auth-screen" id="auth-screen">
     <div class="auth-visual">
       <div class="auth-rings"><div class="auth-logo">W</div><i></i><i></i><i></i></div>
@@ -154,7 +155,7 @@
         <label>DNS 模式<select class="native-select" name="dns_mode"><option value="system">系统 DNS</option><option value="servers">传统 DNS</option><option value="doh">DoH</option></select></label>
         <label class="toggle-label"><input type="checkbox" name="dns_ipv4_only"><span></span>域名仅解析 IPv4（不请求 AAAA）</label>
         <label class="span-2 dns-servers-field">DNS 服务器<input name="dns_servers" placeholder="1.1.1.1:53, 8.8.8.8:53"></label>
-        <label class="span-2 doh-field">DoH URL<input name="doh_url" placeholder="https://cloudflare-dns.com/dns-query"></label>
+        <label class="span-2 doh-field">DoH URLs（每行一个，并行竞速）<textarea name="doh_url" rows="3" placeholder="https://ns.awe.ee/dns-query&#10;https://cloudflare-dns.com/dns-query"></textarea></label>
         <label class="span-2 doh-field">DoH Bootstrap DNS<input name="doh_bootstrap" placeholder="114.114.114.114, 8.8.8.8"></label>
         <label class="doh-field">DoH 超时<input name="doh_timeout" value="10s"></label>
         <label class="toggle-label doh-field"><input type="checkbox" name="doh_insecure"><span></span>跳过 DoH TLS 校验</label>

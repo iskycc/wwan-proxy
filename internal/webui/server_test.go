@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"wwan-proxy/internal/config"
 	"wwan-proxy/internal/manager"
@@ -44,6 +45,9 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	if !bytes.Contains(body, []byte("连接，一目了然")) {
 		t.Fatal("WebUI index was not served")
 	}
+	if !bytes.Contains(body, []byte(`<body class="auth-pending">`)) || !bytes.Contains(body, []byte(`id="boot-screen"`)) {
+		t.Fatal("WebUI does not hide login and dashboard content while authentication is pending")
+	}
 	resp, err = client.Get(ts.URL + "/api/overview")
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status=%v err=%v", resp.StatusCode, err)
@@ -57,7 +61,7 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	cfg := config.Server{Enabled: false, Name: "wwan-test", Listen: "127.0.0.1:11880", HTTPProxy: config.HTTPProxy{Enabled: true, Listen: "127.0.0.1:18080"}, Interface: "lo", Auth: config.Auth{Method: "none"}, DNS: config.DNS{IPv4Only: true}, UDP: config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto"}}
+	cfg := config.Server{Enabled: false, Name: "wwan-test", Listen: "127.0.0.1:11880", HTTPProxy: config.HTTPProxy{Enabled: true, Listen: "127.0.0.1:18080"}, Interface: "lo", Auth: config.Auth{Method: "none"}, DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{URLs: []string{"https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"}, Timeout: config.Duration(time.Second)}}, UDP: config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto"}}
 	raw, _ := json.Marshal(cfg)
 	resp, err = client.Post(ts.URL+"/api/servers", "application/json", bytes.NewReader(raw))
 	if err != nil {
@@ -72,7 +76,7 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if saved.ID == 0 || !saved.HTTPProxy.Enabled || saved.HTTPProxy.Listen != "127.0.0.1:18080" || !saved.DNS.IPv4Only {
+	if saved.ID == 0 || !saved.HTTPProxy.Enabled || saved.HTTPProxy.Listen != "127.0.0.1:18080" || !saved.DNS.IPv4Only || len(saved.DNS.DoH.Endpoints()) != 2 {
 		t.Fatalf("HTTP proxy configuration was not persisted: %+v", saved)
 	}
 
