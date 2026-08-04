@@ -43,6 +43,58 @@ func TestConnect(t *testing.T) {
 	}
 }
 
+func TestRelayMetricsUpdateBeforeStreamEnds(t *testing.T) {
+	srv := New(config.Server{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client, relayClient := net.Pipe()
+	relayUpstream, upstream := net.Pipe()
+	defer client.Close()
+	defer upstream.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- srv.relayTCP(relayClient, relayUpstream, time.Minute) }()
+
+	upload := []byte("upload-while-open")
+	go func() { _, _ = client.Write(upload) }()
+	gotUpload := make([]byte, len(upload))
+	if _, err := io.ReadFull(upstream, gotUpload); err != nil {
+		t.Fatal(err)
+	}
+	waitForSOCKSMetric(t, srv, func(metrics MetricsSnapshot) bool {
+		return metrics.TCPUploadBytes == uint64(len(upload))
+	})
+
+	download := []byte("download-while-open")
+	go func() { _, _ = upstream.Write(download) }()
+	gotDownload := make([]byte, len(download))
+	if _, err := io.ReadFull(client, gotDownload); err != nil {
+		t.Fatal(err)
+	}
+	waitForSOCKSMetric(t, srv, func(metrics MetricsSnapshot) bool {
+		return metrics.TCPDownloadBytes == uint64(len(download))
+	})
+
+	// The streams are deliberately still open when both assertions run.
+	_ = client.Close()
+	_ = upstream.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("relay did not stop")
+	}
+}
+
+func waitForSOCKSMetric(t *testing.T, srv *Server, condition func(MetricsSnapshot) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if condition(srv.Metrics()) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("live SOCKS metrics were not updated before stream close")
+}
+
 func TestUDPAssociate(t *testing.T) {
 	echo, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {

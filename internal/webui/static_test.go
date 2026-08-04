@@ -21,6 +21,8 @@ func TestFrontendUsesWebSocketAndCoalescesRefresh(t *testing.T) {
 		"button.disabled=true",
 		"heap_live_bytes||state.overview.process.heap_bytes",
 		"else if(state.page==='performance'){renderPerformance(a)}",
+		"state.history.up.length>300",
+		"Math.max(299,arr.length-1)",
 	}
 	for _, check := range checks {
 		if !strings.Contains(js, check) {

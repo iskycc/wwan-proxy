@@ -371,8 +371,7 @@ func (s *Server) relayTCP(a, b net.Conn, idle time.Duration) error {
 	b = &deadlineConn{Conn: b, idle: idle}
 	errCh := make(chan error, 2)
 	copyOne := func(dst, src net.Conn, counter *atomic.Uint64) {
-		n, err := io.Copy(dst, src)
-		counter.Add(uint64(n))
+		_, err := io.Copy(&atomicCountingWriter{Writer: dst, counter: counter}, src)
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -392,6 +391,21 @@ func (s *Server) relayTCP(a, b net.Conn, idle time.Duration) error {
 		return first
 	}
 	return second
+}
+
+// atomicCountingWriter records bytes after every successful write so live
+// metrics move while a stream is active instead of jumping when io.Copy ends.
+type atomicCountingWriter struct {
+	io.Writer
+	counter *atomic.Uint64
+}
+
+func (w *atomicCountingWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n > 0 {
+		w.counter.Add(uint64(n))
+	}
+	return n, err
 }
 
 type deadlineConn struct {

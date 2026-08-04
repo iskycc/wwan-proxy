@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,6 +63,56 @@ func TestHTTPForwardingHeadersAndMetrics(t *testing.T) {
 	if metrics.HTTPRequests != 1 || metrics.ConnectTunnels != 0 || metrics.UploadBytes != uint64(len("request-body")) || metrics.DownloadBytes == 0 || metrics.ActiveRequests != 0 {
 		t.Fatalf("unexpected metrics %+v", metrics)
 	}
+}
+
+func TestHTTPDownloadMetricsUpdateBeforeResponseEnds(t *testing.T) {
+	firstChunk := []byte("streaming-response-chunk")
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	firstSent := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(firstChunk)
+		w.(http.Flusher).Flush()
+		close(firstSent)
+		<-release
+		_, _ = w.Write([]byte("tail"))
+	}))
+	defer origin.Close()
+
+	proxy, proxyURL := startTestProxy(t, config.Server{Auth: config.Auth{Method: "none"}})
+	client := proxyClient(proxyURL, nil)
+	type requestResult struct {
+		response *http.Response
+		err      error
+	}
+	resultCh := make(chan requestResult, 1)
+	go func() {
+		response, err := client.Get(origin.URL)
+		resultCh <- requestResult{response: response, err: err}
+	}()
+
+	select {
+	case <-firstSent:
+	case <-time.After(time.Second):
+		t.Fatal("origin did not start streaming")
+	}
+	waitForHTTPMetric(t, proxy, func(metrics MetricsSnapshot) bool {
+		return metrics.DownloadBytes >= uint64(len(firstChunk)) && metrics.ActiveRequests == 1
+	})
+
+	close(release)
+	got := <-resultCh
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	_, _ = io.Copy(io.Discard, got.response.Body)
+	_ = got.response.Body.Close()
 }
 
 func TestAbsoluteTargetOverridesConflictingHost(t *testing.T) {
@@ -114,6 +165,39 @@ func TestHTTPSConnectTunnel(t *testing.T) {
 	}
 	if metrics.ConnectTunnels != 1 || metrics.UploadBytes == 0 || metrics.DownloadBytes == 0 || metrics.ActiveRequests != 0 {
 		t.Fatalf("unexpected CONNECT metrics %+v", metrics)
+	}
+}
+
+func TestConnectRelayMetricsUpdateBeforeTunnelEnds(t *testing.T) {
+	var upload, download atomic.Uint64
+	client, relayClient := net.Pipe()
+	relayUpstream, upstream := net.Pipe()
+	defer client.Close()
+	defer upstream.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- relayTCP(relayClient, relayUpstream, time.Minute, &upload, &download) }()
+
+	uploadPayload := []byte("connect-upload")
+	go func() { _, _ = client.Write(uploadPayload) }()
+	if _, err := io.ReadFull(upstream, make([]byte, len(uploadPayload))); err != nil {
+		t.Fatal(err)
+	}
+	waitForAtomicCounter(t, &upload, uint64(len(uploadPayload)))
+
+	downloadPayload := []byte("connect-download")
+	go func() { _, _ = upstream.Write(downloadPayload) }()
+	if _, err := io.ReadFull(client, make([]byte, len(downloadPayload))); err != nil {
+		t.Fatal(err)
+	}
+	waitForAtomicCounter(t, &download, uint64(len(downloadPayload)))
+
+	_ = client.Close()
+	_ = upstream.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("CONNECT relay did not stop")
 	}
 }
 
@@ -245,6 +329,30 @@ func proxyClient(proxyURL *url.URL, tlsConfig *tls.Config) *http.Client {
 		DialContext:     (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 	}
 	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
+}
+
+func waitForHTTPMetric(t *testing.T, proxy *Server, condition func(MetricsSnapshot) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if condition(proxy.Metrics()) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("live HTTP metrics did not update, latest=%+v", proxy.Metrics())
+}
+
+func waitForAtomicCounter(t *testing.T, counter *atomic.Uint64, expected uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if counter.Load() == expected {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("live tunnel metric=%d, want %d", counter.Load(), expected)
 }
 
 func TestDialContextIsUsed(t *testing.T) {

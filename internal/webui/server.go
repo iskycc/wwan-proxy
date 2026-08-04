@@ -51,7 +51,7 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 		startupWebListen = settings.WebListen
 	}
 	websocketContext, websocketCancel := context.WithCancel(context.Background())
-	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path(), websocketContext: websocketContext, websocketCancel: websocketCancel, websocketInterval: 2 * time.Second}
+	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path(), websocketContext: websocketContext, websocketCancel: websocketCancel, websocketInterval: time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/initialize", s.initializeAdmin)
@@ -129,7 +129,7 @@ func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
 }
 
 var (
-	errWebSocketSessionExpired   = errors.New("websocket session expired")
+	errWebSocketSessionExpired  = errors.New("websocket session expired")
 	errUnsupportedSocketMessage = errors.New("unsupported websocket message")
 )
 

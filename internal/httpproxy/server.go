@@ -224,8 +224,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) error {
 	appendVia(resp.Header)
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	n, copyErr := io.Copy(w, resp.Body)
-	s.metrics.downloadBytes.Add(uint64(n))
+	_, copyErr := io.Copy(&atomicCountingWriter{Writer: w, counter: &s.metrics.downloadBytes}, resp.Body)
 	return copyErr
 }
 
@@ -355,6 +354,21 @@ type countingReadCloser struct {
 	counter *atomic.Uint64
 }
 
+// atomicCountingWriter updates metrics for every successful write. This keeps
+// both forwarded responses and tunnels observable before the stream closes.
+type atomicCountingWriter struct {
+	io.Writer
+	counter *atomic.Uint64
+}
+
+func (w *atomicCountingWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n > 0 {
+		w.counter.Add(uint64(n))
+	}
+	return n, err
+}
+
 func (r *countingReadCloser) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	r.counter.Add(uint64(n))
@@ -395,8 +409,7 @@ func relayTCP(client, upstream net.Conn, idle time.Duration, upload, download *a
 	upstream = &deadlineConn{Conn: upstream, idle: idle}
 	errCh := make(chan error, 2)
 	copyOne := func(dst, src net.Conn, counter *atomic.Uint64) {
-		n, err := io.Copy(dst, src)
-		counter.Add(uint64(n))
+		_, err := io.Copy(&atomicCountingWriter{Writer: dst, counter: counter}, src)
 		if closer, ok := dst.(interface{ CloseWrite() error }); ok {
 			_ = closer.CloseWrite()
 		}
