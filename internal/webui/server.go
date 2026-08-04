@@ -13,6 +13,7 @@ import (
 	runtimemetrics "runtime/metrics"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"wwan-proxy/internal/config"
@@ -30,6 +31,8 @@ type Server struct {
 	started time.Time
 	http    *http.Server
 	limiter *loginLimiter
+	// initialLiveHeap keeps the dashboard stable until the runtime completes its first GC cycle.
+	initialLiveHeap atomic.Uint64
 }
 
 func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Logger) *Server {
@@ -88,6 +91,10 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	var liveHeap uint64
 	if liveHeapSample[0].Value.Kind() == runtimemetrics.KindUint64 {
 		liveHeap = liveHeapSample[0].Value.Uint64()
+	}
+	if liveHeap == 0 {
+		s.initialLiveHeap.CompareAndSwap(0, mem.HeapAlloc)
+		liveHeap = s.initialLiveHeap.Load()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": configs, "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
