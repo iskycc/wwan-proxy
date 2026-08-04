@@ -49,11 +49,33 @@ go build -trimpath -ldflags "-s -w" -o wwan-proxy ./cmd/wwan-proxy
 GitHub Actions 会在每次提交到 `main` 后自动执行以下流程：
 
 1. 运行 `go vet ./...` 和 `go test -race ./...`；
-2. 使用 CGO 分别构建 Linux amd64、Linux arm64；
+2. 使用 CGO 构建 Linux amd64、Linux arm64，以及不依赖 glibc 的 amd64 musl 静态版本；
 3. 打包二进制、README 和 systemd 服务文件；
 4. 创建名为 `build-<12 位提交 SHA>` 的预发布 Release，并附带 `SHA256SUMS`。
 
 也可以在仓库的 Actions 页面手动运行同一流程。重复运行同一提交时会更新原 Release 的附件，不会创建重复标签。
+
+### OpenWrt x86_64
+
+OpenWrt 通常使用 musl。普通 `wwan-proxy-linux-amd64` 是 glibc 动态链接版本，在 OpenWrt 上可能出现 `cannot execute: required file not found`，这是系统缺少 glibc 动态加载器造成的。
+
+在 `uname -m` 输出为 `x86_64` 的 OpenWrt 设备上，请下载 Release 中的：
+
+```text
+wwan-proxy-linux-amd64-musl.tar.gz
+```
+
+该包中的程序通过 musl 完全静态链接，不要求设备安装 glibc 或其他共享库：
+
+```bash
+tar -xzf wwan-proxy-linux-amd64-musl.tar.gz
+cd wwan-proxy-linux-amd64-musl
+chmod +x wwan-proxy
+./wwan-proxy -version
+./wwan-proxy -db ./wwan-proxy.db
+```
+
+代理绑定 WWAN 接口仍需要 root 或对应网络能力。若设备输出为 `aarch64`，不能运行 amd64 包，需要另行提供 arm64 musl 构建。
 
 ## 启动
 

@@ -34,7 +34,7 @@ jobs:
         run: go test -race ./...
 
   build:
-    name: Build linux/${{ matrix.goarch }}
+    name: Build ${{ matrix.package_name }}
     needs: test
     runs-on: ubuntu-latest
     strategy:
@@ -43,8 +43,16 @@ jobs:
         include:
           - goarch: amd64
             cc: gcc
+            libc: glibc
+            package_name: wwan-proxy-linux-amd64
           - goarch: arm64
             cc: aarch64-linux-gnu-gcc
+            libc: glibc
+            package_name: wwan-proxy-linux-arm64
+          - goarch: amd64
+            cc: musl-gcc
+            libc: musl
+            package_name: wwan-proxy-linux-amd64-musl
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -61,31 +69,63 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gcc-aarch64-linux-gnu
 
+      - name: Install musl toolchain
+        if: matrix.libc == 'musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
       - name: Build package
         env:
           CGO_ENABLED: "1"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.cc }}
+          LIBC: ${{ matrix.libc }}
+          PACKAGE_NAME: ${{ matrix.package_name }}
         run: |
           set -euo pipefail
           short_sha="${GITHUB_SHA::12}"
-          package_name="wwan-proxy-linux-${GOARCH}"
-          package_dir="dist/${package_name}"
+          package_dir="dist/${PACKAGE_NAME}"
+          build_ldflags="-s -w -X main.version=${short_sha}"
+          build_tags=()
+          if [ "${LIBC}" = "musl" ]; then
+            build_ldflags="${build_ldflags} -linkmode external -extldflags '-static'"
+            build_tags=(-tags "netgo,osusergo")
+          fi
           mkdir -p "${package_dir}"
           go build \
+            "${build_tags[@]}" \
             -trimpath \
-            -ldflags "-s -w -X main.version=${short_sha}" \
+            -ldflags "${build_ldflags}" \
             -o "${package_dir}/wwan-proxy" \
             ./cmd/wwan-proxy
           cp README.md wwan-proxy.service "${package_dir}/"
-          tar -C dist -czf "dist/${package_name}.tar.gz" "${package_name}"
+          tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+
+      - name: Verify static musl binary
+        if: matrix.libc == 'musl'
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        run: |
+          set -euo pipefail
+          binary="dist/${PACKAGE_NAME}/wwan-proxy"
+          file "${binary}"
+          if readelf -l "${binary}" | grep --quiet 'INTERP'; then
+            echo "musl build unexpectedly contains a dynamic program interpreter" >&2
+            exit 1
+          fi
+          if readelf -d "${binary}" 2>&1 | grep --quiet 'NEEDED'; then
+            echo "musl build unexpectedly depends on a shared library" >&2
+            exit 1
+          fi
+          file "${binary}" | grep --quiet 'statically linked'
 
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
-          name: wwan-proxy-linux-${{ matrix.goarch }}
-          path: dist/wwan-proxy-linux-${{ matrix.goarch }}.tar.gz
+          name: ${{ matrix.package_name }}
+          path: dist/${{ matrix.package_name }}.tar.gz
           if-no-files-found: error
           retention-days: 14
 
