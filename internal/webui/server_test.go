@@ -10,12 +10,14 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"wwan-proxy/internal/config"
 	"wwan-proxy/internal/manager"
+	"wwan-proxy/internal/proxyauth"
 	"wwan-proxy/internal/store"
 )
 
@@ -53,6 +55,11 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatalf("unauthenticated status=%v err=%v", resp.StatusCode, err)
 	}
 	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/api/interfaces")
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated interfaces status=%v err=%v", resp.StatusCode, err)
+	}
+	_ = resp.Body.Close()
 	authBody := []byte(`{"username":"administrator","password":"StrongPassword!42"}`)
 	resp, err = client.Post(ts.URL+"/api/auth/initialize", "application/json", bytes.NewReader(authBody))
 	if err != nil || resp.StatusCode != http.StatusCreated {
@@ -61,7 +68,17 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	cfg := config.Server{Enabled: false, Name: "wwan-test", Listen: "127.0.0.1:11880", HTTPProxy: config.HTTPProxy{Enabled: true, Listen: "127.0.0.1:18080"}, Interface: "lo", Auth: config.Auth{Method: "none"}, DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{URLs: []string{"https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"}, Timeout: config.Duration(time.Second)}}, UDP: config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto"}}
+	resp, err = client.Get(ts.URL + "/api/interfaces")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("interfaces status=%v err=%v", resp.StatusCode, err)
+	}
+	var interfaces []interfaceInfo
+	if err := json.NewDecoder(resp.Body).Decode(&interfaces); err != nil || len(interfaces) == 0 {
+		t.Fatalf("interfaces=%+v err=%v", interfaces, err)
+	}
+	_ = resp.Body.Close()
+
+	cfg := config.Server{Enabled: false, Name: "wwan-test", Listen: "127.0.0.1:11880", HTTPProxy: config.HTTPProxy{Enabled: true, Listen: "127.0.0.1:18080"}, Interface: "lo", Bind: config.SOCKS5Bind{Enabled: true, Advertise: "127.0.0.1"}, Auth: config.Auth{Method: "username_password", Users: map[string]string{"proxy-user": "proxy-secret"}}, Access: config.AccessControl{AdmissionCIDRs: []string{"127.0.0.0/8"}, TargetDefault: "deny", TargetRules: []string{"allow *.example.com:443"}, MaxConnectionsPerIP: 4, MaxUDPAssociationsPerIP: 1}, DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{URLs: []string{"https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"}, Timeout: config.Duration(time.Second)}}, UDP: config.UDP{Enabled: true, StrictEndpoint: true, BindIP: "127.0.0.1", Advertise: "auto", AdvertiseMap: map[string]string{"127.0.0.1": "127.0.0.2"}, RelayPorts: []int{14000, 14007, 14019}}}
 	raw, _ := json.Marshal(cfg)
 	resp, err = client.Post(ts.URL+"/api/servers", "application/json", bytes.NewReader(raw))
 	if err != nil {
@@ -76,9 +93,35 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if saved.ID == 0 || !saved.HTTPProxy.Enabled || saved.HTTPProxy.Listen != "127.0.0.1:18080" || !saved.DNS.IPv4Only || len(saved.DNS.DoH.Endpoints()) != 2 {
+	if saved.ID == 0 || !saved.HTTPProxy.Enabled || saved.HTTPProxy.Listen != "127.0.0.1:18080" || !saved.Bind.Enabled || saved.Bind.Advertise != "127.0.0.1" || saved.Access.TargetDefault != "deny" || saved.Access.MaxConnectionsPerIP != 4 || saved.Access.MaxUDPAssociationsPerIP != 1 || len(saved.UDP.RelayPorts) != 3 || saved.UDP.RelayPorts[1] != 14007 || !saved.UDP.StrictEndpoint || saved.UDP.AdvertiseMap["127.0.0.1"] != "127.0.0.2" || !saved.DNS.IPv4Only || len(saved.DNS.DoH.Endpoints()) != 2 {
 		t.Fatalf("HTTP proxy configuration was not persisted: %+v", saved)
 	}
+	if saved.Auth.Users["proxy-user"] != "" || len(saved.Auth.PasswordUnchanged) != 1 || saved.Auth.PasswordUnchanged[0] != "proxy-user" {
+		t.Fatalf("proxy password leaked in save response: %+v", saved.Auth.Users)
+	}
+	stored, err := st.GetServer(context.Background(), saved.ID)
+	if err != nil || !proxyauth.IsHash(stored.Auth.Users["proxy-user"]) {
+		t.Fatalf("proxy password was not hashed at rest: %+v err=%v", stored.Auth.Users, err)
+	}
+
+	resp, err = client.Post(ts.URL+"/api/servers/"+strconv.FormatInt(saved.ID, 10)+"/toggle", "application/json", nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("toggle status=%v err=%v body=%s", resp.StatusCode, err, b)
+	}
+	var toggled config.Server
+	if err := json.NewDecoder(resp.Body).Decode(&toggled); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if toggled.Auth.Users["proxy-user"] != "" || len(toggled.Auth.PasswordUnchanged) != 1 {
+		t.Fatalf("proxy password hash leaked in toggle response: %+v", toggled.Auth.Users)
+	}
+	resp, err = client.Post(ts.URL+"/api/servers/"+strconv.FormatInt(saved.ID, 10)+"/toggle", "application/json", nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("second toggle status=%v err=%v", resp.StatusCode, err)
+	}
+	_ = resp.Body.Close()
 
 	resp, err = client.Get(ts.URL + "/api/overview")
 	if err != nil {

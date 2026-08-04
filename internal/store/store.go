@@ -92,6 +92,16 @@ func openAt(path string) (*Store, error) {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
 	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open database file securely: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return nil, fmt.Errorf("restrict database permissions: %w", err)
+	}
 	db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on")
 	if err != nil {
 		return nil, err
@@ -102,7 +112,20 @@ func openAt(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := restrictSQLitePermissions(path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
+}
+
+func restrictSQLitePermissions(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(candidate, 0600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict SQLite file %s: %w", candidate, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error          { return s.db.Close() }
@@ -110,15 +133,36 @@ func (s *Store) Path() string          { return s.path }
 func (s *Store) BootstrapPath() string { return s.bootstrapPath }
 
 func (s *Store) cloneTo(target string) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0750); err != nil {
+	targetDir := filepath.Dir(target)
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return err
 	}
-	quoted := strings.ReplaceAll(filepath.ToSlash(target), "'", "''")
-	_, err := s.db.Exec(`VACUUM INTO '` + quoted + `'`)
-	return err
+	// SQLite chooses the VACUUM INTO mode using the process umask. Stage the
+	// copy inside a private directory so even an unusually permissive umask can
+	// never expose credentials before we explicitly restrict the file.
+	stageDir, err := os.MkdirTemp(targetDir, ".wwan-proxy-migrate-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+	staged := filepath.Join(stageDir, filepath.Base(target))
+	quoted := strings.ReplaceAll(filepath.ToSlash(staged), "'", "''")
+	if _, err := s.db.Exec(`VACUUM INTO '` + quoted + `'`); err != nil {
+		return err
+	}
+	if err := restrictSQLitePermissions(staged); err != nil {
+		return err
+	}
+	// Link is an atomic no-replace publication on the Linux filesystems this
+	// service targets. It avoids silently overwriting a destination created by
+	// another process while the snapshot was being built.
+	if err := os.Link(staged, target); err != nil {
+		return fmt.Errorf("publish migrated database: %w", err)
+	}
+	return restrictSQLitePermissions(target)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -173,9 +217,18 @@ CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   settings_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);`
+);
+CREATE TABLE IF NOT EXISTS security_migrations (
+  name TEXT PRIMARY KEY,
+  cleanup_pending INTEGER NOT NULL DEFAULT 1
+);
+INSERT OR IGNORE INTO security_migrations(name,cleanup_pending)
+VALUES('proxy_credentials_v1',1);`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
+	}
+	if err := s.migrateProxyCredentials(ctx); err != nil {
+		return fmt.Errorf("migrate proxy credentials: %w", err)
 	}
 	return nil
 }
@@ -222,7 +275,21 @@ func (s *Store) GetServer(ctx context.Context, id int64) (config.Server, error) 
 }
 
 func (s *Store) SaveServer(ctx context.Context, cfg *config.Server) error {
+	return s.saveServer(ctx, cfg, true)
+}
+
+// SaveServerInput persists an untrusted configuration/API representation.
+// Unlike SaveServer, a hash-shaped explicit password is still treated as the
+// user's literal password and hashed again. Internal snapshots use SaveServer.
+func (s *Store) SaveServerInput(ctx context.Context, cfg *config.Server) error {
+	return s.saveServer(ctx, cfg, false)
+}
+
+func (s *Store) saveServer(ctx context.Context, cfg *config.Server, trustStoredHashes bool) error {
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := s.prepareProxyCredentials(ctx, cfg, trustStoredHashes); err != nil {
 		return err
 	}
 	var conflictID int64

@@ -64,6 +64,15 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if s.logLevelSetter != nil {
+		// Validation above guarantees this update cannot fail for the built-in
+		// persistent handler. Apply it only after SQLite accepts the setting so a
+		// failed save never creates a runtime/persistent split.
+		if err := s.logLevelSetter.SetLevel(settings.LogLevel); err != nil {
+			s.internalError(w, r, "apply log level", err)
+			return
+		}
+	}
 	_ = s.store.PruneLogs(r.Context(), time.Now().AddDate(0, 0, -settings.LogRetentionDays))
 	_ = s.store.PruneSessions(r.Context(), time.Now())
 	s.log.Info("system settings saved", "remote", clientIP(r), "restart_required", s.settingsResponse(settings).RestartRequired)

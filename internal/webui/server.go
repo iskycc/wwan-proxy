@@ -9,11 +9,14 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime"
 	runtimemetrics "runtime/metrics"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,17 +44,22 @@ type Server struct {
 	websocketCancel     context.CancelFunc
 	websocketInterval   time.Duration
 	websocketClients    atomic.Int64
+	configurationMu     sync.Mutex
+	logLevelSetter      interface{ SetLevel(string) error }
 	// initialLiveHeap keeps the dashboard stable until the runtime completes its first GC cycle.
 	initialLiveHeap atomic.Uint64
 }
 
-func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Logger) *Server {
+func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Logger, levelSetters ...interface{ SetLevel(string) error }) *Server {
 	startupWebListen := address
 	if settings, err := st.SystemSettings(context.Background()); err == nil {
 		startupWebListen = settings.WebListen
 	}
 	websocketContext, websocketCancel := context.WithCancel(context.Background())
 	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path(), websocketContext: websocketContext, websocketCancel: websocketCancel, websocketInterval: time.Second}
+	if len(levelSetters) > 0 {
+		s.logLevelSetter = levelSetters[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/initialize", s.initializeAdmin)
@@ -66,6 +74,7 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/ws", s.overviewWebSocket)
 	mux.HandleFunc("GET /api/servers", s.listServers)
+	mux.HandleFunc("GET /api/interfaces", s.listInterfaces)
 	mux.HandleFunc("POST /api/servers", s.saveServer)
 	mux.HandleFunc("PUT /api/servers/{id}", s.saveServer)
 	mux.HandleFunc("DELETE /api/servers/{id}", s.deleteServer)
@@ -122,8 +131,10 @@ func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
 		s.initialLiveHeap.CompareAndSwap(0, mem.HeapAlloc)
 		liveHeap = s.initialLiveHeap.Load()
 	}
+	sampledAt := time.Now().UTC()
 	return map[string]any{
-		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": configs, "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
+		"service_instance_id": s.started.UTC().Format(time.RFC3339Nano), "sampled_at": sampledAt,
+		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": redactServerCredentials(configs), "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
 		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC, "websocket_clients": s.websocketClients.Load()},
 	}, nil
 }
@@ -240,7 +251,38 @@ func (s *Server) listServers(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "list configurations", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, configs)
+	writeJSON(w, http.StatusOK, redactServerCredentials(configs))
+}
+
+type interfaceInfo struct {
+	Index     int      `json:"index"`
+	Name      string   `json:"name"`
+	MTU       int      `json:"mtu"`
+	Flags     string   `json:"flags"`
+	Addresses []string `json:"addresses"`
+}
+
+func (s *Server) listInterfaces(w http.ResponseWriter, r *http.Request) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		s.internalError(w, r, "list network interfaces", err)
+		return
+	}
+	result := make([]interfaceInfo, 0, len(interfaces))
+	for _, networkInterface := range interfaces {
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			s.internalError(w, r, "list network interface addresses", err)
+			return
+		}
+		info := interfaceInfo{Index: networkInterface.Index, Name: networkInterface.Name, MTU: networkInterface.MTU, Flags: networkInterface.Flags.String(), Addresses: make([]string, 0, len(addresses))}
+		for _, address := range addresses {
+			info.Addresses = append(info.Addresses, address.String())
+		}
+		result = append(result, info)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) saveServer(w http.ResponseWriter, r *http.Request) {
@@ -264,17 +306,42 @@ func (s *Server) saveServer(w http.ResponseWriter, r *http.Request) {
 	} else {
 		cfg.ID = 0
 	}
-	if err := s.store.SaveServer(r.Context(), &cfg); err != nil {
+	s.configurationMu.Lock()
+	defer s.configurationMu.Unlock()
+	mutationCtx, mutationCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer mutationCancel()
+	var previous *config.Server
+	if cfg.ID != 0 {
+		old, err := s.store.GetServer(mutationCtx, cfg.ID)
+		if err != nil {
+			s.internalError(w, r, "load previous server configuration", err)
+			return
+		}
+		previous = &old
+	}
+	if err := s.store.SaveServerInput(mutationCtx, &cfg); err != nil {
 		s.log.Warn("save server configuration rejected", "server", cfg.Name, "interface", cfg.Interface, "remote", r.RemoteAddr, "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.manager.Reload(r.Context(), cfg.ID); err != nil {
+	if err := s.manager.Reload(mutationCtx, cfg.ID); err != nil {
+		compensationCtx, compensationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer compensationCancel()
+		var compensationErr error
+		if previous == nil {
+			s.manager.Remove(cfg.ID)
+			compensationErr = s.store.DeleteServer(compensationCtx, cfg.ID)
+		} else {
+			compensationErr = s.store.SaveServer(compensationCtx, previous)
+		}
+		if compensationErr != nil {
+			err = fmt.Errorf("%w; configuration compensation failed: %v", err, compensationErr)
+		}
 		s.internalError(w, r, "reload server configuration", err)
 		return
 	}
 	s.log.Info("server configuration saved", "server", cfg.Name, "interface", cfg.Interface, "id", cfg.ID, "enabled", cfg.Enabled)
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, redactServerCredential(cfg))
 }
 
 func (s *Server) deleteServer(w http.ResponseWriter, r *http.Request) {
@@ -284,17 +351,21 @@ func (s *Server) deleteServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	cfg, err := s.store.GetServer(r.Context(), id)
+	s.configurationMu.Lock()
+	defer s.configurationMu.Unlock()
+	mutationCtx, mutationCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer mutationCancel()
+	cfg, err := s.store.GetServer(mutationCtx, id)
 	if err != nil {
 		s.log.Warn("delete requested for unknown server", "id", id, "remote", r.RemoteAddr, "error", err)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "server not found"})
 		return
 	}
-	s.manager.Remove(id)
-	if err := s.store.DeleteServer(r.Context(), id); err != nil {
+	if err := s.store.DeleteServer(mutationCtx, id); err != nil {
 		s.internalError(w, r, "delete server configuration", err)
 		return
 	}
+	s.manager.Remove(id)
 	s.log.Warn("server configuration deleted", "server", cfg.Name, "interface", cfg.Interface, "id", id)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -306,23 +377,33 @@ func (s *Server) toggleServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	cfg, err := s.store.GetServer(r.Context(), id)
+	s.configurationMu.Lock()
+	defer s.configurationMu.Unlock()
+	mutationCtx, mutationCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer mutationCancel()
+	cfg, err := s.store.GetServer(mutationCtx, id)
 	if err != nil {
 		s.log.Warn("toggle requested for unknown server", "id", id, "remote", r.RemoteAddr, "error", err)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "server not found"})
 		return
 	}
+	previous := cfg
 	cfg.Enabled = !cfg.Enabled
-	if err := s.store.SaveServer(r.Context(), &cfg); err != nil {
+	if err := s.store.SaveServer(mutationCtx, &cfg); err != nil {
 		s.internalError(w, r, "save server toggle", err)
 		return
 	}
-	if err := s.manager.Reload(r.Context(), id); err != nil {
+	if err := s.manager.Reload(mutationCtx, id); err != nil {
+		compensationCtx, compensationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer compensationCancel()
+		if compensationErr := s.store.SaveServer(compensationCtx, &previous); compensationErr != nil {
+			err = fmt.Errorf("%w; toggle compensation failed: %v", err, compensationErr)
+		}
 		s.internalError(w, r, "reload toggled server", err)
 		return
 	}
 	s.log.Info("server toggled", "server", cfg.Name, "interface", cfg.Interface, "enabled", cfg.Enabled)
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, redactServerCredential(cfg))
 }
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
@@ -347,6 +428,28 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func redactServerCredentials(configs []config.Server) []config.Server {
+	result := make([]config.Server, len(configs))
+	for i, cfg := range configs {
+		result[i] = redactServerCredential(cfg)
+	}
+	return result
+}
+
+func redactServerCredential(cfg config.Server) config.Server {
+	if len(cfg.Auth.Users) == 0 {
+		return cfg
+	}
+	users := make(map[string]string, len(cfg.Auth.Users))
+	for user := range cfg.Auth.Users {
+		users[user] = ""
+		cfg.Auth.PasswordUnchanged = append(cfg.Auth.PasswordUnchanged, user)
+	}
+	sort.Strings(cfg.Auth.PasswordUnchanged)
+	cfg.Auth.Users = users
+	return cfg
 }
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
 	s.log.Error("Web API operation failed", "operation", operation, "path", r.URL.Path, "remote", r.RemoteAddr, "error", err)

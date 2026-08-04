@@ -21,8 +21,19 @@ func TestFrontendUsesWebSocketAndCoalescesRefresh(t *testing.T) {
 		"button.disabled=true",
 		"heap_live_bytes||state.overview.process.heap_bytes",
 		"else if(state.page==='performance'){renderPerformance(a)}",
-		"state.history.up.length>300",
-		"Math.max(299,arr.length-1)",
+		"samplePerformance(overview)",
+		"HISTORY_STORAGE_KEY='wwan-proxy.performance-history.v3'",
+		"state.history.serviceID!==serviceID",
+		"previous.generation!==latest.generation",
+		"latest.up<previous.up||latest.down<previous.down",
+		"sampledAt-state.history.lastAt",
+		"if(elapsed<0){state.history.points=state.history.points.filter(point=>point.at<=sampledAt)",
+		"if(elapsed===0)return",
+		"patchHTML($('#runtime-grid')",
+		"patchHTML(root,state.servers.map",
+		"const staging=root.cloneNode(false)",
+		"if(value===before)continue",
+		"window.addEventListener('pagehide',saveHistory)",
 	}
 	for _, check := range checks {
 		if !strings.Contains(js, check) {
@@ -36,6 +47,11 @@ func TestFrontendUsesWebSocketAndCoalescesRefresh(t *testing.T) {
 	}
 	if strings.Contains(js, "api('/api/servers')") {
 		t.Fatal("refresh must not duplicate server configuration already delivered over WebSocket")
+	}
+	for _, forbidden := range []string{"$('#runtime-grid').innerHTML", "const now=Date.now(),totalUp", "state.history.up.push", "if(state.page==='overview')['#kpi-active'"} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("live performance rendering must retain history and DOM state; found %q", forbidden)
+		}
 	}
 }
 
@@ -81,6 +97,52 @@ func TestFrontendExposesIPv4OnlyDNSConfiguration(t *testing.T) {
 	for _, check := range []string{"dns_ipv4_only", "ipv4_only", "不请求 AAAA", "· IPv4"} {
 		if !strings.Contains(content, check) {
 			t.Fatalf("IPv4-only DNS frontend binding %q is missing", check)
+		}
+	}
+}
+
+func TestFrontendExposesAndSavesRuntimeLogLevel(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, html := string(jsContent), string(htmlContent)
+	for _, check := range []string{"f.elements.log_level.value=settings.log_level||'WARN'", "log_level:f.elements.log_level.value", "syncCustomSelects()"} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("runtime log-level frontend binding %q is missing", check)
+		}
+	}
+	for _, check := range []string{"name=\"log_level\"", "value=\"DEBUG\"", "value=\"INFO\"", "value=\"WARN\"", "value=\"ERROR\"", "控制台与 SQLite"} {
+		if !strings.Contains(html, check) {
+			t.Fatalf("runtime log-level setting %q is missing", check)
+		}
+	}
+}
+
+func TestFrontendExposesBindAccessControlAndInterfaceDiscovery(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(jsContent) + string(htmlContent)
+	for _, check := range []string{
+		"bind_enabled", "bind:{enabled", "admission_cidrs", "target_default", "target_rules",
+		"max_connections_per_ip", "max_udp_associations_per_ip", "/api/interfaces", "network-interfaces",
+		"udp_relay_ports", "relay_ports", "relay_port", "udpRelayPortList", "物理 / 虚拟均可", "proxy-security-warning",
+		"udp_max_associations", "max_associations", "http_proxy_listen.addEventListener('input',updateSecurityWarning)",
+		"password_unchanged", "passwordUnchanged", "bind_advertise", "strict_endpoint", "udp_strict_endpoint",
+		"ports.length>4096", "最多 4096 个",
+	} {
+		if !strings.Contains(content, check) {
+			t.Fatalf("BIND/access/interface frontend binding %q is missing", check)
 		}
 	}
 }

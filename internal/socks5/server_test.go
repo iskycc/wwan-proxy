@@ -1,6 +1,8 @@
 package socks5
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"wwan-proxy/internal/config"
+	"wwan-proxy/internal/policy"
 )
 
 func TestConnect(t *testing.T) {
@@ -80,6 +83,43 @@ func TestRelayMetricsUpdateBeforeStreamEnds(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("relay did not stop")
+	}
+}
+
+func TestGracefulCloseForceClosesTrackedUpstreamAtDeadline(t *testing.T) {
+	srv := New(config.Server{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client, relayClient := net.Pipe()
+	relayUpstream, upstream := net.Pipe()
+	defer client.Close()
+	defer upstream.Close()
+	if !srv.trackOutbound(relayClient) || !srv.trackOutbound(relayUpstream) {
+		t.Fatal("failed to register relay endpoints")
+	}
+	srv.wg.Add(1)
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		defer srv.wg.Done()
+		defer srv.track(relayClient, false)
+		defer srv.track(relayUpstream, false)
+		_ = srv.relayTCP(relayClient, relayUpstream, time.Minute)
+	}()
+	// One direction ends cleanly while the upstream side remains silent. This
+	// used to leave relayTCP waiting until the full idle timeout.
+	_ = client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := srv.GracefulClose(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GracefulClose error=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("forced relay drain exceeded its deadline by too much: %v", elapsed)
+	}
+	select {
+	case <-relayDone:
+	case <-time.After(time.Second):
+		t.Fatal("tracked upstream was not closed by forced drain")
 	}
 }
 
@@ -176,6 +216,28 @@ func TestPasswordAuthentication(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestHealthProbeBypassesClientTargetACLButKeepsBoundDialPath(t *testing.T) {
+	echo := listenTCPEcho(t)
+	defer echo.Close()
+	srv := New(config.Server{
+		ConnectTimeout: config.Duration(time.Second),
+		Access:         config.AccessControl{TargetDefault: "deny"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+	address := echo.Addr().String()
+	if conn, err := srv.DialContext(context.Background(), "tcp", address); !errors.Is(err, policy.ErrTargetDenied) {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		t.Fatalf("client dial was not denied: %v", err)
+	}
+	conn, err := srv.ProbeDialContext(context.Background(), "tcp", address)
+	if err != nil {
+		t.Fatalf("route-bound health probe was blocked by client ACL: %v", err)
+	}
+	_ = conn.Close()
 }
 
 func listenTCPEcho(t *testing.T) net.Listener {

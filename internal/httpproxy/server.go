@@ -3,7 +3,6 @@ package httpproxy
 import (
 	"bufio"
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -19,6 +18,8 @@ import (
 	"time"
 
 	"wwan-proxy/internal/config"
+	"wwan-proxy/internal/policy"
+	"wwan-proxy/internal/proxyauth"
 )
 
 type DialContext func(context.Context, string, string) (net.Conn, error)
@@ -31,6 +32,9 @@ type MetricsSnapshot struct {
 	ConnectTunnels uint64 `json:"connect_tunnels"`
 	UploadBytes    uint64 `json:"upload_bytes"`
 	DownloadBytes  uint64 `json:"download_bytes"`
+	AdmissionDrops uint64 `json:"admission_drops"`
+	LimitDrops     uint64 `json:"connection_limit_drops"`
+	TargetDenied   uint64 `json:"target_denied"`
 }
 
 type metricCounters struct {
@@ -41,6 +45,9 @@ type metricCounters struct {
 	connectTunnels atomic.Uint64
 	uploadBytes    atomic.Uint64
 	downloadBytes  atomic.Uint64
+	admissionDrops atomic.Uint64
+	limitDrops     atomic.Uint64
+	targetDenied   atomic.Uint64
 }
 
 type Server struct {
@@ -49,20 +56,41 @@ type Server struct {
 	dial      DialContext
 	transport *http.Transport
 	http      *http.Server
-	sem       chan struct{}
+	limiter   *policy.Limiter
+	access    *policy.Access
+	clients   *policy.IPLimiter
 
-	mu       sync.Mutex
-	listener net.Listener
-	active   map[net.Conn]struct{}
-	closing  bool
-	metrics  metricCounters
+	mu           sync.Mutex
+	listener     net.Listener
+	active       map[net.Conn]struct{}
+	closing      bool
+	ready        chan struct{}
+	readyOnce    sync.Once
+	handlerCount int
+	handlerDone  chan struct{}
+	finishOnce   sync.Once
+	metrics      metricCounters
 }
 
 func New(cfg config.Server, logger *slog.Logger, dial DialContext) *Server {
-	s := &Server{cfg: cfg, log: logger.With("server", cfg.Name, "interface", cfg.Interface), dial: dial, active: make(map[net.Conn]struct{})}
-	if cfg.MaxConnections > 0 {
-		s.sem = make(chan struct{}, cfg.MaxConnections)
+	return NewWithLimiter(cfg, logger, dial, policy.NewLimiter(cfg.MaxConnections))
+}
+
+func NewWithLimiter(cfg config.Server, logger *slog.Logger, dial DialContext, limiter *policy.Limiter) *Server {
+	return NewWithLimiters(cfg, logger, dial, limiter, policy.NewIPLimiter(cfg.Access.MaxConnectionsPerIP))
+}
+
+// NewWithLimiters accepts shared instance-wide capacity controls.
+func NewWithLimiters(cfg config.Server, logger *slog.Logger, dial DialContext, limiter *policy.Limiter, clients *policy.IPLimiter) *Server {
+	handlerDone := make(chan struct{})
+	close(handlerDone)
+	s := &Server{
+		cfg: cfg, log: logger.With("server", cfg.Name, "interface", cfg.Interface), dial: dial,
+		active: make(map[net.Conn]struct{}), ready: make(chan struct{}), handlerDone: handlerDone,
 	}
+	s.access, _ = policy.NewAccess(cfg.Access)
+	s.clients = clients
+	s.limiter = limiter
 	timeout := cfg.ConnectTimeout.Value(10 * time.Second)
 	s.transport = &http.Transport{
 		Proxy:                 nil,
@@ -90,24 +118,36 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.cfg.HTTPProxy.Listen, err)
 	}
+	defer ln.Close()
 	return s.Serve(ctx, ln)
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return nil
+	}
 	s.listener = ln
 	s.mu.Unlock()
+	s.readyOnce.Do(func() { close(s.ready) })
 	s.log.Info("HTTP/HTTPS proxy listening", "address", ln.Addr())
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = s.http.Close()
+			_ = s.Close()
 		case <-done:
 		}
 	}()
 	err := s.http.Serve(ln)
 	close(done)
+	s.mu.Lock()
+	if s.listener == ln {
+		s.listener = nil
+	}
+	s.mu.Unlock()
 	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 		return nil
 	}
@@ -115,14 +155,60 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) Close() error {
-	s.transport.CloseIdleConnections()
 	s.mu.Lock()
 	s.closing = true
+	ln := s.listener
 	for conn := range s.active {
 		_ = conn.Close()
 	}
+	handlersDone := s.handlerDone
 	s.mu.Unlock()
-	return s.http.Close()
+	if ln != nil {
+		_ = ln.Close()
+	}
+	err := s.http.Close()
+	<-handlersDone
+	s.finish()
+	return err
+}
+
+// Ready is closed after the listening socket has been installed successfully.
+// It allows the manager to distinguish a usable replacement from an async bind
+// failure during a configuration handoff.
+func (s *Server) Ready() <-chan struct{} { return s.ready }
+
+// StopAccepting releases only the listening socket. Established HTTP requests
+// and CONNECT tunnels remain usable while a replacement binds the same port.
+func (s *Server) StopAccepting() {
+	s.mu.Lock()
+	ln := s.listener
+	s.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+	}
+}
+
+// GracefulClose drains ordinary HTTP requests via http.Server.Shutdown and
+// separately waits for hijacked CONNECT handlers, which net/http no longer owns.
+func (s *Server) GracefulClose(ctx context.Context) error {
+	s.StopAccepting()
+	shutdownErr := s.http.Shutdown(ctx)
+	s.mu.Lock()
+	s.closing = true
+	done := s.handlerDone
+	s.mu.Unlock()
+	select {
+	case <-done:
+		s.finish()
+		return shutdownErr
+	case <-ctx.Done():
+		_ = s.Close()
+		return ctx.Err()
+	}
+}
+
+func (s *Server) finish() {
+	s.finishOnce.Do(func() { s.transport.CloseIdleConnections() })
 }
 
 func (s *Server) Metrics() MetricsSnapshot {
@@ -131,22 +217,42 @@ func (s *Server) Metrics() MetricsSnapshot {
 		ActiveRequests: m.activeRequests.Load(), TotalRequests: m.totalRequests.Load(), RequestErrors: m.requestErrors.Load(),
 		HTTPRequests: m.httpRequests.Load(), ConnectTunnels: m.connectTunnels.Load(),
 		UploadBytes: m.uploadBytes.Load(), DownloadBytes: m.downloadBytes.Load(),
+		AdmissionDrops: m.admissionDrops.Load(), LimitDrops: m.limitDrops.Load(), TargetDenied: m.targetDenied.Load(),
 	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.metrics.totalRequests.Add(1)
-	if s.sem != nil {
-		select {
-		case s.sem <- struct{}{}:
-			defer func() { <-s.sem }()
-		default:
-			s.metrics.requestErrors.Add(1)
-			w.Header().Set("Connection", "close")
-			http.Error(w, "proxy connection limit reached", http.StatusServiceUnavailable)
-			return
-		}
+	if !s.beginHandler() {
+		w.Header().Set("Connection", "close")
+		http.Error(w, "proxy is shutting down", http.StatusServiceUnavailable)
+		return
 	}
+	defer s.endHandler()
+	s.metrics.totalRequests.Add(1)
+	remote := tcpAddress(r.RemoteAddr)
+	if s.access != nil && !s.access.AllowClient(remote) {
+		s.metrics.admissionDrops.Add(1)
+		w.Header().Set("Connection", "close")
+		http.Error(w, "proxy client is not allowed", http.StatusForbidden)
+		return
+	}
+	releaseClient, allowed := s.clients.Acquire(remote)
+	if !allowed {
+		s.metrics.limitDrops.Add(1)
+		w.Header().Set("Connection", "close")
+		http.Error(w, "proxy per-IP connection limit reached", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseClient()
+	releaseCapacity, allowed := s.limiter.Acquire()
+	if !allowed {
+		s.metrics.requestErrors.Add(1)
+		s.metrics.limitDrops.Add(1)
+		w.Header().Set("Connection", "close")
+		http.Error(w, "proxy connection limit reached", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseCapacity()
 	s.metrics.activeRequests.Add(1)
 	defer s.metrics.activeRequests.Add(-1)
 	if !s.authorize(w, r) {
@@ -168,6 +274,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) beginHandler() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return false
+	}
+	if s.handlerCount == 0 {
+		s.handlerDone = make(chan struct{})
+	}
+	s.handlerCount++
+	return true
+}
+
+func (s *Server) endHandler() {
+	s.mu.Lock()
+	s.handlerCount--
+	if s.handlerCount == 0 {
+		close(s.handlerDone)
+	}
+	s.mu.Unlock()
+}
+
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	if s.cfg.Auth.Method != "username_password" {
 		return true
@@ -183,8 +311,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	username, password, ok := strings.Cut(string(raw), ":")
-	expected, exists := s.cfg.Auth.Users[username]
-	if !ok || !exists || subtle.ConstantTimeCompare([]byte(expected), []byte(password)) != 1 {
+	if !ok || !proxyauth.VerifyUser(s.cfg.Auth.Users, username, password) {
 		proxyAuthRequired(w)
 		return false
 	}
@@ -216,6 +343,11 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) error {
 	}
 	resp, err := s.transport.RoundTrip(out)
 	if err != nil {
+		if errors.Is(err, policy.ErrTargetDenied) {
+			s.metrics.targetDenied.Add(1)
+			http.Error(w, "proxy target is not allowed", http.StatusForbidden)
+			return err
+		}
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return fmt.Errorf("round trip %s: %w", out.URL.Redacted(), err)
 	}
@@ -243,6 +375,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) error {
 	}
 	upstream, err := s.dial(r.Context(), "tcp", target)
 	if err != nil {
+		if errors.Is(err, policy.ErrTargetDenied) {
+			s.metrics.targetDenied.Add(1)
+			http.Error(w, "proxy target is not allowed", http.StatusForbidden)
+			return fmt.Errorf("connect %s: %w", target, err)
+		}
 		http.Error(w, "upstream connection failed", http.StatusBadGateway)
 		return fmt.Errorf("connect %s: %w", target, err)
 	}
@@ -273,6 +410,20 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) error {
 	s.log.Debug("HTTP CONNECT", "client", r.RemoteAddr, "destination", target)
 	return relayTCP(bufferedClient, upstream, s.cfg.IdleTimeout.Value(5*time.Minute), &s.metrics.uploadBytes, &s.metrics.downloadBytes)
 }
+
+func tcpAddress(value string) net.Addr {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return stringAddress(value)
+	}
+	n, _ := strconv.Atoi(port)
+	return &net.TCPAddr{IP: net.ParseIP(host), Port: n}
+}
+
+type stringAddress string
+
+func (a stringAddress) Network() string { return "tcp" }
+func (a stringAddress) String() string  { return string(a) }
 
 func (s *Server) track(conns ...net.Conn) bool {
 	s.mu.Lock()

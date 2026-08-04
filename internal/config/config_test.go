@@ -37,6 +37,39 @@ func TestServerJSONAndDefaults(t *testing.T) {
 	}
 }
 
+func TestSystemSettingsLogLevelDefaultsAndNormalization(t *testing.T) {
+	settings := SystemSettings{}
+	settings.ApplyDefaults()
+	if settings.LogLevel != "WARN" {
+		t.Fatalf("default log level=%q", settings.LogLevel)
+	}
+	settings.LogLevel = " debug "
+	settings.WebListen = "127.0.0.1:9090"
+	if err := settings.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if settings.LogLevel != "DEBUG" {
+		t.Fatalf("normalized log level=%q", settings.LogLevel)
+	}
+}
+
+func TestLegacyUDPRelayPortJSONCompatibility(t *testing.T) {
+	var cfg Server
+	if err := json.Unmarshal([]byte(`{
+      "name":"legacy-port","listen":"127.0.0.1:1080","interface":"lo",
+      "udp":{"enabled":true,"bind_ip":"127.0.0.1","advertise":"auto","relay_port":53000}
+    }`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("legacy relay_port config rejected: %v", err)
+	}
+	ports := cfg.UDP.FixedRelayPorts()
+	if len(ports) != 1 || ports[0] != 53000 {
+		t.Fatalf("legacy relay_port resolved to %v", ports)
+	}
+}
+
 func TestHTTPProxyValidation(t *testing.T) {
 	cfg := Server{
 		Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", Auth: Auth{Method: "none"},
@@ -131,6 +164,79 @@ func TestNormalizeBootstrapDNSAddress(t *testing.T) {
 	for _, invalid := range []string{"dns.example", "127.0.0.1:0", "127.0.0.1:65536"} {
 		if _, err := NormalizeBootstrapDNSAddress(invalid); err == nil {
 			t.Fatalf("invalid bootstrap DNS %q accepted", invalid)
+		}
+	}
+}
+
+func TestAccessDefaultsAndBindSafetyForLegacyJSON(t *testing.T) {
+	var cfg Server
+	if err := json.Unmarshal([]byte(`{"name":"legacy","listen":"127.0.0.1:1080","interface":"lo"}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ApplyDefaults()
+	if cfg.Bind.Enabled {
+		t.Fatal("legacy configuration unexpectedly enabled SOCKS5 BIND")
+	}
+	if cfg.Access.TargetDefault != "allow" {
+		t.Fatalf("legacy target default=%q, want allow", cfg.Access.TargetDefault)
+	}
+}
+
+func TestAccessControlValidationAndTargetRuleParsing(t *testing.T) {
+	cfg := Server{
+		Name: "acl", Listen: "127.0.0.1:1080", Interface: "lo", Auth: Auth{Method: "none"},
+		Access: AccessControl{
+			AdmissionCIDRs: []string{"10.0.0.0/8", "2001:db8::/32"}, TargetDefault: "deny",
+			TargetRules:         []string{"allow *.example.com:443", "deny 192.0.2.0/24:1-1023", "allow [2001:db8::/32]:8443"},
+			MaxConnectionsPerIP: 12, MaxUDPAssociationsPerIP: 2,
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := ParseTargetACLRule("deny 192.0.2.0/24:20-21")
+	if err != nil || rule.Action != "deny" || rule.Target != "192.0.2.0/24" || rule.PortMin != 20 || rule.PortMax != 21 {
+		t.Fatalf("rule=%+v err=%v", rule, err)
+	}
+	for _, invalid := range []string{"permit *", "allow", "deny example.com:0", "allow bad..example", "deny [2001:db8::1]:2-1"} {
+		if _, err := ParseTargetACLRule(invalid); err == nil {
+			t.Fatalf("invalid rule %q accepted", invalid)
+		}
+	}
+	cfg.Access.AdmissionCIDRs = []string{"10.0.0.1"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "admission_cidrs") {
+		t.Fatalf("invalid admission CIDR err=%v", err)
+	}
+	cfg.Access.AdmissionCIDRs = nil
+	cfg.Access.MaxConnectionsPerIP = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_connections_per_ip") {
+		t.Fatalf("negative per-IP connection limit err=%v", err)
+	}
+}
+
+func TestStructuredUnchangedPasswordValidation(t *testing.T) {
+	cfg := Server{
+		Name: "auth", Listen: "127.0.0.1:1080", Interface: "lo",
+		Auth: Auth{Method: "username_password", Users: map[string]string{"alice": ""}, PasswordUnchanged: []string{"alice"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("structured unchanged password rejected: %v", err)
+	}
+	cfg.Auth.PasswordUnchanged = nil
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("empty password without unchanged marker was accepted")
+	}
+	cfg.Auth.PasswordUnchanged = []string{"missing"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unchanged marker for missing user was accepted")
+	}
+}
+
+func TestBindAdvertiseValidation(t *testing.T) {
+	for _, address := range []string{"not-an-ip", "0.0.0.0", "::", "fe80::1", "ff02::1", "255.255.255.255"} {
+		cfg := Server{Name: "bind", Listen: "127.0.0.1:1080", Interface: "lo", Bind: SOCKS5Bind{Advertise: address}}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("invalid BIND advertise address %q was accepted", address)
 		}
 	}
 }

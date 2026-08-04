@@ -2,10 +2,14 @@ package manager
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"wwan-proxy/internal/store"
@@ -13,31 +17,80 @@ import (
 
 const heartbeatURL = "https://1.1.1.1/cdn-cgi/trace"
 
+var heartbeatFailureReminder = 5 * time.Minute
+
 func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 	timeout := inst.cfg.Heartbeat.Timeout.Value(12 * time.Second)
 	interval := inst.cfg.Heartbeat.Interval.Value(30 * time.Second)
 	endpoint := inst.cfg.Heartbeat.URL
 	transport := &http.Transport{
-		Proxy: nil, DialContext: inst.server.DialContext, ForceAttemptHTTP2: true,
+		Proxy: nil, DialContext: inst.server.ProbeDialContext, ForceAttemptHTTP2: true,
 		IdleConnTimeout: interval + 15*time.Second, TLSHandshakeTimeout: timeout, ResponseHeaderTimeout: timeout,
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport}
+	client := &http.Client{
+		Transport: transport,
+		// ProbeDialContext intentionally bypasses client target ACLs. Never let a
+		// heartbeat endpoint expand that privilege through an HTTP redirect.
+		CheckRedirect: rejectHeartbeatRedirect,
+	}
 	var previousHealthy *bool
+	var firstFailure time.Time
+	var lastFailureLog time.Time
+	var previousFailureSignature string
+	var consecutiveFailures int
 	check := func() {
-		h := performHeartbeatWithTimeout(ctx, client, inst.cfg.ID, endpoint, timeout)
+		probe := executeHeartbeat(ctx, client, inst.cfg.ID, endpoint, timeout)
+		h := probe.heartbeat
 		if ctx.Err() != nil {
 			return
 		}
-		if err := m.store.SaveHeartbeat(context.Background(), h); err != nil {
+		if err := m.store.SaveHeartbeat(ctx, h); err != nil {
 			m.log.Error("save heartbeat status failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "error", err)
 		}
 		if !h.Healthy {
+			consecutiveFailures++
+			if firstFailure.IsZero() {
+				firstFailure = h.CheckedAt
+			}
 			inst.setError("heartbeat: " + h.Error)
-			m.log.Error("WWAN heartbeat failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "url", endpoint, "latency_ms", h.LatencyMS, "error", h.Error)
+			iface := collectInterfaceDiagnostic(inst.cfg.Interface)
+			signature := probe.failureStage + "\x00" + h.Error + "\x00" + iface.signature()
+			now := time.Now()
+			if previousHealthy == nil || *previousHealthy || signature != previousFailureSignature || now.Sub(lastFailureLog) >= heartbeatFailureReminder {
+				args := []any{
+					"server", inst.cfg.Name,
+					"interface", inst.cfg.Interface,
+					"endpoint", sanitizeHeartbeatEndpoint(endpoint),
+					"target_host", heartbeatTargetHost(endpoint),
+					"stage", probe.failureStage,
+					"classification", classifyHeartbeatFailure(probe.failureStage, probe.cause),
+					"timeout", timeout,
+					"latency_ms", h.LatencyMS,
+					"http_status", h.StatusCode,
+					"consecutive_failures", consecutiveFailures,
+					"failure_duration", now.Sub(firstFailure).Round(time.Millisecond),
+					"error", h.Error,
+					"error_chain", heartbeatErrorChain(probe.cause, endpoint),
+				}
+				args = append(args, probe.trace.logAttrs(endpoint)...)
+				args = append(args, heartbeatDNSLogAttrs(inst.cfg)...)
+				args = append(args, iface.logAttrs()...)
+				m.log.Error("egress heartbeat failed", args...)
+				lastFailureLog = now
+			}
+			previousFailureSignature = signature
 		} else if previousHealthy == nil || !*previousHealthy {
 			inst.clearHeartbeatError()
-			m.log.Info("WWAN heartbeat healthy", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo)
+			if previousHealthy != nil {
+				m.log.Warn("egress heartbeat recovered", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo, "failed_checks", consecutiveFailures, "failure_duration", time.Since(firstFailure).Round(time.Millisecond))
+			} else {
+				m.log.Info("egress heartbeat healthy", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo)
+			}
+			firstFailure = time.Time{}
+			lastFailureLog = time.Time{}
+			previousFailureSignature = ""
+			consecutiveFailures = 0
 		}
 		healthy := h.Healthy
 		previousHealthy = &healthy
@@ -55,6 +108,8 @@ func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 	}
 }
 
+func rejectHeartbeatRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 func performHeartbeat(parent context.Context, client *http.Client, serverID int64) store.Heartbeat {
 	return performHeartbeatAt(parent, client, serverID, heartbeatURL)
 }
@@ -64,17 +119,33 @@ func performHeartbeatAt(parent context.Context, client *http.Client, serverID in
 }
 
 func performHeartbeatWithTimeout(parent context.Context, client *http.Client, serverID int64, endpoint string, timeout time.Duration) store.Heartbeat {
+	return executeHeartbeat(parent, client, serverID, endpoint, timeout).heartbeat
+}
+
+type heartbeatProbeResult struct {
+	heartbeat    store.Heartbeat
+	failureStage string
+	cause        error
+	trace        heartbeatTraceSnapshot
+}
+
+func executeHeartbeat(parent context.Context, client *http.Client, serverID int64, endpoint string, timeout time.Duration) heartbeatProbeResult {
 	started := time.Now()
 	h := store.Heartbeat{ServerID: serverID, CheckedAt: started}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	traceState := newHeartbeatTraceState()
+	ctx = httptrace.WithClientTrace(ctx, traceState.clientTrace())
+	traceState.setStage("request_build")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err == nil {
 		req.Header.Set("User-Agent", "wwan-proxy/heartbeat")
+		traceState.setStage("http_round_trip")
 		resp, doErr := client.Do(req)
-		err = doErr
+		err = unwrapHeartbeatURLError(doErr)
 		if resp != nil {
 			h.StatusCode = resp.StatusCode
+			traceState.setStage("response_body")
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			_ = resp.Body.Close()
 			if err == nil {
@@ -94,14 +165,202 @@ func performHeartbeatWithTimeout(parent context.Context, client *http.Client, se
 				}
 			}
 			if err == nil && resp.StatusCode != http.StatusOK {
+				traceState.setStage("http_status")
 				err = fmt.Errorf("unexpected HTTP status %s", resp.Status)
 			}
 		}
 	}
 	h.LatencyMS = time.Since(started).Milliseconds()
 	h.Healthy = err == nil
+	result := heartbeatProbeResult{heartbeat: h, trace: traceState.snapshot()}
 	if err != nil {
-		h.Error = err.Error()
+		result.failureStage = traceState.stage()
+		result.cause = err
+		result.heartbeat.Error = formatHeartbeatError(result.failureStage, err, endpoint)
 	}
-	return h
+	return result
+}
+
+type heartbeatTraceState struct {
+	mu                    sync.Mutex
+	currentStage          string
+	dnsHost               string
+	dnsAddresses          []string
+	dnsError              string
+	connectAttempts       []string
+	connectErrors         []string
+	localAddress          string
+	remoteAddress         string
+	connectionReused      bool
+	tlsVersion            string
+	tlsError              string
+	requestWriteError     string
+	firstResponseByteSeen bool
+}
+
+type heartbeatTraceSnapshot struct {
+	DNSHost               string
+	DNSAddresses          []string
+	DNSError              string
+	ConnectAttempts       []string
+	ConnectErrors         []string
+	LocalAddress          string
+	RemoteAddress         string
+	ConnectionReused      bool
+	TLSVersion            string
+	TLSError              string
+	RequestWriteError     string
+	FirstResponseByteSeen bool
+}
+
+func newHeartbeatTraceState() *heartbeatTraceState { return &heartbeatTraceState{} }
+
+func (s *heartbeatTraceState) setStage(stage string) {
+	s.mu.Lock()
+	s.currentStage = stage
+	s.mu.Unlock()
+}
+
+func (s *heartbeatTraceState) stage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.currentStage == "" {
+		return "unknown"
+	}
+	return s.currentStage
+}
+
+func (s *heartbeatTraceState) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			s.mu.Lock()
+			s.currentStage = "dns"
+			s.dnsHost = info.Host
+			s.mu.Unlock()
+		},
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			s.mu.Lock()
+			for _, address := range info.Addrs {
+				s.dnsAddresses = appendUniqueLimited(s.dnsAddresses, address.String(), 16)
+			}
+			if info.Err != nil {
+				// A custom resolver (notably DoH) can perform its own TCP/TLS work
+				// under the same trace while the outer DNS lookup is in flight.
+				// Those callbacks may temporarily advance currentStage; the final
+				// DNSDone result is authoritative for heartbeat classification.
+				s.currentStage = "dns"
+				s.dnsError = info.Err.Error()
+			} else {
+				s.currentStage = "tcp_connect"
+			}
+			s.mu.Unlock()
+		},
+		ConnectStart: func(network, address string) {
+			s.mu.Lock()
+			s.currentStage = "tcp_connect"
+			s.connectAttempts = appendUniqueLimited(s.connectAttempts, network+" "+address, 16)
+			s.mu.Unlock()
+		},
+		ConnectDone: func(network, address string, err error) {
+			s.mu.Lock()
+			if err != nil {
+				s.connectErrors = appendUniqueLimited(s.connectErrors, network+" "+address+": "+err.Error(), 16)
+			} else {
+				s.currentStage = "http_round_trip"
+			}
+			s.mu.Unlock()
+		},
+		TLSHandshakeStart: func() { s.setStage("tls_handshake") },
+		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+			s.mu.Lock()
+			if err != nil {
+				s.tlsError = err.Error()
+			} else {
+				s.tlsVersion = tlsVersionName(state.Version)
+				s.currentStage = "response_headers"
+			}
+			s.mu.Unlock()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			s.mu.Lock()
+			s.currentStage = "response_headers"
+			s.connectionReused = info.Reused
+			if info.Conn != nil {
+				s.localAddress = info.Conn.LocalAddr().String()
+				s.remoteAddress = info.Conn.RemoteAddr().String()
+			}
+			s.mu.Unlock()
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				return
+			}
+			s.mu.Lock()
+			s.currentStage = "request_write"
+			s.requestWriteError = info.Err.Error()
+			s.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			s.mu.Lock()
+			s.currentStage = "response_headers"
+			s.firstResponseByteSeen = true
+			s.mu.Unlock()
+		},
+	}
+}
+
+func (s *heartbeatTraceState) snapshot() heartbeatTraceSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return heartbeatTraceSnapshot{
+		DNSHost: s.dnsHost, DNSAddresses: append([]string(nil), s.dnsAddresses...), DNSError: s.dnsError,
+		ConnectAttempts: append([]string(nil), s.connectAttempts...), ConnectErrors: append([]string(nil), s.connectErrors...),
+		LocalAddress: s.localAddress, RemoteAddress: s.remoteAddress, ConnectionReused: s.connectionReused,
+		TLSVersion: s.tlsVersion, TLSError: s.tlsError, RequestWriteError: s.requestWriteError,
+		FirstResponseByteSeen: s.firstResponseByteSeen,
+	}
+}
+
+func (s heartbeatTraceSnapshot) logAttrs(endpoint string) []any {
+	return []any{
+		"dns_host", s.DNSHost, "resolved_addresses", s.DNSAddresses, "dns_error", sanitizeHeartbeatErrorText(s.DNSError, endpoint),
+		"connect_attempts", s.ConnectAttempts, "connect_errors", sanitizeHeartbeatErrorTexts(s.ConnectErrors, endpoint),
+		"local_address", s.LocalAddress, "remote_address", s.RemoteAddress, "connection_reused", s.ConnectionReused,
+		"tls_version", s.TLSVersion, "tls_error", sanitizeHeartbeatErrorText(s.TLSError, endpoint), "request_write_error", sanitizeHeartbeatErrorText(s.RequestWriteError, endpoint),
+		"first_response_byte", s.FirstResponseByteSeen,
+	}
+}
+
+func appendUniqueLimited(values []string, value string, limit int) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	if len(values) >= limit {
+		return values
+	}
+	return append(values, value)
+}
+
+func tlsVersionName(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS1.0"
+	case tls.VersionTLS11:
+		return "TLS1.1"
+	case tls.VersionTLS12:
+		return "TLS1.2"
+	case tls.VersionTLS13:
+		return "TLS1.3"
+	default:
+		return fmt.Sprintf("0x%04x", version)
+	}
+}
+
+func unwrapHeartbeatURLError(err error) error {
+	if requestErr, ok := err.(*url.Error); ok {
+		return fmt.Errorf("HTTP %s: %w", requestErr.Op, requestErr.Err)
+	}
+	return err
 }

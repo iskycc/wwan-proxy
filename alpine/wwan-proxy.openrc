@@ -1,0 +1,175 @@
+#!/sbin/openrc-run
+# Variables and callbacks below are consumed by openrc-run; Alpine's ash
+# provides local, while pgrep is not part of this service's dependencies.
+# shellcheck disable=SC2009,SC2034,SC3043
+
+name="wwan-proxy"
+description="Multi-interface SOCKS5 and HTTP proxy"
+
+# These paths and the service account are deliberately fixed so the installer
+# and OpenRC can never manage one binary while starting another one.
+WWAN_PROXY_USER="wwan-proxy"
+WWAN_PROXY_GROUP="wwan-proxy"
+WWAN_PROXY_BINARY="/usr/local/bin/wwan-proxy"
+WWAN_PROXY_DATA_DIR="/var/lib/wwan-proxy"
+WWAN_PROXY_DATABASE="/var/lib/wwan-proxy/wwan-proxy.db"
+WWAN_PROXY_LOG_DIR="/var/log/wwan-proxy"
+WWAN_PROXY_RUNTIME_DIR="/run/wwan-proxy"
+
+supervisor="supervise-daemon"
+command="${WWAN_PROXY_BINARY}"
+command_args="-db ${WWAN_PROXY_DATABASE}"
+command_user="${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}"
+directory="${WWAN_PROXY_DATA_DIR}"
+pidfile="${WWAN_PROXY_RUNTIME_DIR}/supervise-daemon.pid"
+output_log="${WWAN_PROXY_LOG_DIR}/service.log"
+error_log="${WWAN_PROXY_LOG_DIR}/service.log"
+umask="0077"
+rc_ulimit="${WWAN_PROXY_ULIMIT:--n 65536}"
+respawn_delay="${WWAN_PROXY_RESPAWN_DELAY:-2}"
+respawn_max="${WWAN_PROXY_RESPAWN_MAX:-5}"
+respawn_period="${WWAN_PROXY_RESPAWN_PERIOD:-60}"
+retry="SIGTERM/15/SIGKILL/5"
+required_files="${WWAN_PROXY_BINARY}"
+
+extra_commands="check diagnose log follow"
+description_check="Validate the installation without starting the service"
+description_diagnose="Print system, network and recent service diagnostics"
+description_log="Print the latest service log entries"
+description_follow="Follow the service log"
+
+depend() {
+	need net
+	after firewall
+}
+
+verify_binary_capability() {
+	if ! command -v getcap >/dev/null 2>&1; then
+		eerror "getcap is unavailable; install the Alpine libcap-utils package"
+		return 1
+	fi
+	getcap "${WWAN_PROXY_BINARY}" 2>/dev/null | grep -Eq '(^|[[:space:]])cap_net_raw([=,+]|,)' || {
+		eerror "${WWAN_PROXY_BINARY} does not have cap_net_raw; rerun install-alpine.sh"
+		return 1
+	}
+}
+
+validate_installation() {
+	local failed=0
+	local metadata
+
+	if [ ! -x "${WWAN_PROXY_BINARY}" ]; then
+		eerror "binary is missing or not executable: ${WWAN_PROXY_BINARY}"
+		failed=1
+	elif ! "${WWAN_PROXY_BINARY}" -version >/dev/null 2>&1; then
+		eerror "binary cannot execute on this system: ${WWAN_PROXY_BINARY}"
+		failed=1
+	fi
+	if ! id "${WWAN_PROXY_USER}" >/dev/null 2>&1; then
+		eerror "service user does not exist: ${WWAN_PROXY_USER}"
+		failed=1
+	fi
+	if ! grep -q "^${WWAN_PROXY_GROUP}:" /etc/group 2>/dev/null; then
+		eerror "service group does not exist: ${WWAN_PROXY_GROUP}"
+		failed=1
+	fi
+	if [ ! -d "${WWAN_PROXY_DATA_DIR}" ]; then
+		eerror "required directory is missing: ${WWAN_PROXY_DATA_DIR}"
+		failed=1
+	else
+		metadata=$(stat -c '%U:%G:%a' "${WWAN_PROXY_DATA_DIR}" 2>/dev/null || echo unknown)
+		if [ "${metadata}" != "${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}:750" ]; then
+			eerror "unsafe directory metadata: ${WWAN_PROXY_DATA_DIR} (${metadata}, expected ${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}:750)"
+			failed=1
+		fi
+	fi
+	if [ ! -d "${WWAN_PROXY_LOG_DIR}" ]; then
+		eerror "required directory is missing: ${WWAN_PROXY_LOG_DIR}"
+		failed=1
+	else
+		metadata=$(stat -c '%U:%G:%a' "${WWAN_PROXY_LOG_DIR}" 2>/dev/null || echo unknown)
+		if [ "${metadata}" != "root:${WWAN_PROXY_GROUP}:750" ]; then
+			eerror "unsafe directory metadata: ${WWAN_PROXY_LOG_DIR} (${metadata}, expected root:${WWAN_PROXY_GROUP}:750)"
+			failed=1
+		fi
+	fi
+	if [ -e "${WWAN_PROXY_LOG_DIR}/service.log" ]; then
+		metadata=$(stat -c '%U:%G:%a' "${WWAN_PROXY_LOG_DIR}/service.log" 2>/dev/null || echo unknown)
+		if [ "${metadata}" != "${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}:640" ]; then
+			eerror "unsafe service log metadata: ${metadata}, expected ${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}:640"
+			failed=1
+		fi
+	fi
+	if ! verify_binary_capability; then
+		failed=1
+	fi
+	return "${failed}"
+}
+
+start_pre() {
+	checkpath --directory --owner "${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}" --mode 0750 \
+		"${WWAN_PROXY_DATA_DIR}" || return 1
+	checkpath --directory --owner "root:${WWAN_PROXY_GROUP}" --mode 0750 \
+		"${WWAN_PROXY_LOG_DIR}" || return 1
+	checkpath --directory --owner root:root --mode 0755 "${WWAN_PROXY_RUNTIME_DIR}" || return 1
+	checkpath --file --owner "${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}" --mode 0640 \
+		"${WWAN_PROXY_LOG_DIR}/service.log" || return 1
+	validate_installation
+}
+
+check() {
+	ebegin "Validating ${RC_SVCNAME} installation"
+	validate_installation
+	local result=$?
+	if [ "${result}" -eq 0 ]; then
+		einfo "version: $("${WWAN_PROXY_BINARY}" -version 2>&1)"
+		einfo "capability: $(getcap "${WWAN_PROXY_BINARY}" 2>&1)"
+	fi
+	eend "${result}"
+}
+
+diagnose() {
+	einfo "===== wwan-proxy diagnosis $(date -u '+%Y-%m-%dT%H:%M:%SZ') ====="
+	einfo "Alpine: $(cat /etc/alpine-release 2>/dev/null || echo unknown)"
+	einfo "Kernel: $(uname -a 2>&1)"
+	einfo "OpenRC: $(openrc --version 2>&1 | head -n 1)"
+	einfo "Binary: ${WWAN_PROXY_BINARY}"
+	ls -l "${WWAN_PROXY_BINARY}" 2>&1 || true
+	getcap "${WWAN_PROXY_BINARY}" 2>&1 || true
+	"${WWAN_PROXY_BINARY}" -version 2>&1 || true
+	einfo "Service account:"
+	id "${WWAN_PROXY_USER}" 2>&1 || true
+	einfo "Paths:"
+	ls -ld "${WWAN_PROXY_DATA_DIR}" "${WWAN_PROXY_LOG_DIR}" "${WWAN_PROXY_RUNTIME_DIR}" 2>&1 || true
+	ls -l "${WWAN_PROXY_DATABASE}" "${WWAN_PROXY_DATABASE}-wal" "${WWAN_PROXY_DATABASE}-shm" 2>&1 || true
+	einfo "Service status:"
+	rc-service "${RC_SVCNAME}" status 2>&1 || true
+	einfo "Processes:"
+	ps -o pid,user,group,comm 2>&1 | grep -E '[w]wan-proxy|[s]upervise-daemon' || true
+	einfo "Listening sockets:"
+	netstat -lntup 2>&1 || true
+	if command -v ip >/dev/null 2>&1; then
+		einfo "Interfaces:"
+		ip link show 2>&1 || true
+		einfo "Addresses:"
+		ip address show 2>&1 || true
+		einfo "Routes:"
+		ip route show table all 2>&1 || true
+		ip -6 route show table all 2>&1 || true
+	fi
+	einfo "Resolvers:"
+	grep -E '^[[:space:]]*(nameserver|search|options)[[:space:]]' /etc/resolv.conf 2>&1 || true
+	einfo "Filesystem:"
+	df -h "${WWAN_PROXY_DATA_DIR}" "${WWAN_PROXY_LOG_DIR}" 2>&1 || true
+	einfo "Recent service log:"
+	tail -n 200 "${WWAN_PROXY_LOG_DIR}/service.log" 2>&1 || true
+	einfo "===== diagnosis complete ====="
+}
+
+log() {
+	tail -n 200 "${WWAN_PROXY_LOG_DIR}/service.log"
+}
+
+follow() {
+	tail -n 200 -f "${WWAN_PROXY_LOG_DIR}/service.log"
+}

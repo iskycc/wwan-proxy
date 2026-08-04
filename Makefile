@@ -1,4 +1,4 @@
-.PHONY: all test check clean
+.PHONY: all test check check-scripts clean
 
 all: wwan-proxy
 
@@ -11,6 +11,15 @@ test:
 check:
 	go vet ./...
 	go test -race ./...
+	$(MAKE) check-scripts
+
+check-scripts:
+	sh -n scripts/install-alpine.sh
+	sh -n alpine/wwan-proxy.openrc
+	test -x scripts/install-alpine.sh
+	test -x alpine/wwan-proxy.openrc
+	test -s alpine/wwan-proxy.confd
+	test -s alpine/wwan-proxy.logrotate
 
 clean:
 	rm -f wwan-proxy

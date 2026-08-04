@@ -1,0 +1,11 @@
+# OpenRC settings for wwan-proxy. The installer preserves this file on upgrades.
+# The binary, service account, database, runtime and log paths are fixed in the
+# init script; only runtime policy and the installer health probe belong here.
+WWAN_PROXY_ULIMIT="-n 65536"
+WWAN_PROXY_RESPAWN_DELAY="2"
+WWAN_PROXY_RESPAWN_MAX="5"
+WWAN_PROXY_RESPAWN_PERIOD="60"
+
+# Used by install-alpine.sh for a post-start HTTP probe. If the WebUI listen
+# address was changed in SQLite, update this URL or pass --health-url.
+WWAN_PROXY_HEALTH_URL="http://127.0.0.1:9090/api/health"

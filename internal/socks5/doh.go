@@ -198,8 +198,9 @@ func (d *dohResolver) raceProviders(ctx context.Context, wire []byte) ([]byte, e
 }
 
 func (d *dohResolver) queryProvider(ctx context.Context, provider *dohProvider, wire []byte) ([]byte, error) {
+	providerLabel := dohEndpointLabel(provider.endpoint)
 	if len(provider.upstreams) == 0 {
-		return nil, fmt.Errorf("DoH %s has no usable bootstrap DNS server", provider.endpoint)
+		return nil, fmt.Errorf("DoH %s has no usable bootstrap DNS server", providerLabel)
 	}
 	start := int((provider.next.Add(1) - 1) % uint64(len(provider.upstreams)))
 	var attemptErrors []error
@@ -218,7 +219,15 @@ func (d *dohResolver) queryProvider(ctx context.Context, provider *dohProvider, 
 			break
 		}
 	}
-	return nil, fmt.Errorf("DoH %s failed: %w", provider.endpoint, errors.Join(attemptErrors...))
+	return nil, fmt.Errorf("DoH %s failed: %w", providerLabel, errors.Join(attemptErrors...))
+}
+
+func dohEndpointLabel(endpoint string) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid DoH endpoint>"
+	}
+	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
 }
 
 func (d *dohResolver) lookupIPv4(parent context.Context, host string) ([]net.IP, error) {
@@ -363,6 +372,14 @@ func (d *dohResolver) queryUpstream(ctx context.Context, endpoint string, upstre
 	}
 	resp, err := upstream.client.Do(req)
 	if err != nil {
+		// http.Client returns *url.Error, whose URL field contains the complete
+		// DoH endpoint. Paths and query strings commonly carry API tokens, so do
+		// not retain that wrapper anywhere in the returned error chain. Preserve
+		// the operation and underlying transport/DNS/TLS cause instead.
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			return nil, unwrapDoHURLError(requestError)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -382,6 +399,23 @@ func (d *dohResolver) queryUpstream(ctx context.Context, endpoint string, upstre
 		return nil, fmt.Errorf("invalid DoH DNS response length %d", len(body))
 	}
 	return body, nil
+}
+
+func unwrapDoHURLError(requestError *url.Error) error {
+	if requestError == nil || requestError.Err == nil {
+		if requestError == nil {
+			return errors.New("DoH HTTP request failed")
+		}
+		return fmt.Errorf("DoH HTTP %s failed", requestError.Op)
+	}
+	cause := requestError.Err
+	// A non-conforming RoundTripper or another HTTP layer can nest url.Error.
+	// Strip every URL-bearing wrapper so no raw endpoint survives in the chain.
+	var nested *url.Error
+	if errors.As(cause, &nested) {
+		cause = unwrapDoHURLError(nested)
+	}
+	return fmt.Errorf("DoH HTTP %s: %w", requestError.Op, cause)
 }
 
 type dohConn struct {

@@ -27,7 +27,10 @@ func main() {
 		return
 	}
 
-	console := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	// PersistentHandler owns the live minimum level for both destinations. Keep
+	// the downstream console open to DEBUG so raising verbosity at runtime does
+	// not require rebuilding the logger or restarting the service.
+	console := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
 	st, err := store.Open(*dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open SQLite database:", err)
@@ -44,6 +47,9 @@ func main() {
 		effectiveWebAddress = *webAddress
 	}
 	handler, flushLogs := store.NewPersistentHandler(console, st)
+	if err := handler.SetLevel(settings.LogLevel); err != nil {
+		fmt.Fprintln(os.Stderr, "invalid persisted log level; using WARN:", err)
+	}
 	logger := slog.New(handler)
 	_ = st.PruneLogs(context.Background(), time.Now().AddDate(0, 0, -settings.LogRetentionDays))
 	_ = st.PruneSessions(context.Background(), time.Now())
@@ -58,7 +64,7 @@ func main() {
 		_ = st.Close()
 		os.Exit(2)
 	}
-	ui := webui.New(effectiveWebAddress, st, mgr, logger)
+	ui := webui.New(effectiveWebAddress, st, mgr, logger, handler)
 	errCh := make(chan error, 1)
 	go func() { errCh <- ui.ListenAndServe() }()
 	logger.Info("wwan-proxy started", "component", "startup", "database", st.Path(), "web", effectiveWebAddress)

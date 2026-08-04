@@ -22,7 +22,7 @@ func TestSystemSettingsAndDatabaseRelocation(t *testing.T) {
 	if err := s.SaveServer(context.Background(), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	settings := config.SystemSettings{WebListen: "127.0.0.1:9191", DatabasePath: target, LogRetentionDays: 45, SessionLifetime: config.Duration(48 * time.Hour)}
+	settings := config.SystemSettings{WebListen: "127.0.0.1:9191", DatabasePath: target, LogLevel: "ERROR", LogRetentionDays: 45, SessionLifetime: config.Duration(48 * time.Hour)}
 	if err := s.SaveSystemSettings(context.Background(), &settings); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestSystemSettingsAndDatabaseRelocation(t *testing.T) {
 		t.Fatalf("configs=%+v err=%v", configs, err)
 	}
 	got, err := reopened.SystemSettings(context.Background())
-	if err != nil || got.WebListen != settings.WebListen || got.LogRetentionDays != 45 {
+	if err != nil || got.WebListen != settings.WebListen || got.LogLevel != "ERROR" || got.LogRetentionDays != 45 {
 		t.Fatalf("settings=%+v err=%v", got, err)
 	}
 	secondTarget := filepath.Join(dir, "second", "proxy.db")
@@ -85,5 +85,10 @@ func TestSystemSettingsValidation(t *testing.T) {
 	settings.DatabasePath = "relative.db"
 	if err := settings.Validate(); err == nil {
 		t.Fatal("relative database path accepted")
+	}
+	settings.DatabasePath = ""
+	settings.LogLevel = "trace"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("invalid log level accepted")
 	}
 }

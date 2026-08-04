@@ -1,5 +1,5 @@
 [Unit]
-Description=WWAN SOCKS5 Proxy
+Description=Multi-interface SOCKS5 and HTTP Proxy
 After=network-online.target
 Wants=network-online.target
 

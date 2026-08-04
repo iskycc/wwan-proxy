@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -36,20 +37,29 @@ func (s *logSink) close() {
 type PersistentHandler struct {
 	console slog.Handler
 	sink    *logSink
+	level   *slog.LevelVar
 	attrs   []slog.Attr
 	groups  []string
 }
 
 func NewPersistentHandler(console slog.Handler, store *Store) (*PersistentHandler, func()) {
 	sink := newLogSink(store)
-	return &PersistentHandler{console: console, sink: sink}, sink.close
+	level := new(slog.LevelVar)
+	level.Set(slog.LevelWarn)
+	return &PersistentHandler{console: console, sink: sink, level: level}, sink.close
 }
 
 func (h *PersistentHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	return true
+	return level >= h.level.Level()
 }
 
 func (h *PersistentHandler) Handle(ctx context.Context, record slog.Record) error {
+	// Enabled is normally called by slog.Logger before Handle. Re-check here so
+	// an in-flight record cannot slip into either sink after a stricter level is
+	// applied through the settings API.
+	if !h.Enabled(ctx, record.Level) {
+		return nil
+	}
 	var consoleErr error
 	if h.console.Enabled(ctx, record.Level) {
 		consoleErr = h.console.Handle(ctx, record)
@@ -72,6 +82,36 @@ func (h *PersistentHandler) Handle(ctx context.Context, record slog.Record) erro
 		fmt.Fprintln(os.Stderr, "sqlite log queue full; dropping log entry")
 	}
 	return consoleErr
+}
+
+// SetLevel changes the shared minimum level used by this handler and every
+// logger derived from it through With/WithGroup. The filter runs before both
+// the console handler and the SQLite queue, so disabled records are not stored
+// in either destination. It is safe to call while logs are being emitted.
+func (h *PersistentHandler) SetLevel(name string) error {
+	level, err := parseLogLevel(name)
+	if err != nil {
+		return err
+	}
+	h.level.Set(level)
+	return nil
+}
+
+func (h *PersistentHandler) Level() string { return h.level.Level().String() }
+
+func parseLogLevel(name string) (slog.Level, error) {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "DEBUG":
+		return slog.LevelDebug, nil
+	case "INFO":
+		return slog.LevelInfo, nil
+	case "WARN":
+		return slog.LevelWarn, nil
+	case "ERROR":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("log level must be DEBUG, INFO, WARN, or ERROR")
+	}
 }
 
 func (h *PersistentHandler) WithAttrs(attrs []slog.Attr) slog.Handler {

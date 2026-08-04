@@ -289,7 +289,7 @@ func TestIPv4OnlyDoHPreservesEndpointAndBootstrapDNSError(t *testing.T) {
 	}
 	bootstrapAddress := closedListener.LocalAddr().String()
 	_ = closedListener.Close()
-	endpoint := "https://resolver.invalid/dns-query"
+	endpoint := "https://resolver.invalid:4443/private-provider-token/dns-query?api_key=private#private-fragment"
 	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
 		URL: endpoint, BootstrapIPs: []string{bootstrapAddress}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -301,21 +301,97 @@ func TestIPv4OnlyDoHPreservesEndpointAndBootstrapDNSError(t *testing.T) {
 		t.Fatal("expected DoH failure")
 	}
 	message := err.Error()
-	for _, detail := range []string{"DoH " + endpoint, "bootstrap DNS " + bootstrapAddress, "resolve resolver.invalid", "resolve IPv4 example.test"} {
+	for _, detail := range []string{"DoH https://resolver.invalid:4443", "bootstrap DNS " + bootstrapAddress, "resolve resolver.invalid", "resolve IPv4 example.test"} {
 		if !strings.Contains(message, detail) {
 			t.Fatalf("detailed DoH error is missing %q: %v", detail, err)
 		}
 	}
+	for _, secret := range []string{"private-provider-token", "api_key=private", "private-fragment"} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("DoH error string leaked %q: %v", secret, err)
+		}
+	}
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		t.Fatalf("DoH error chain retained URL-bearing error %q", requestError.URL)
+	}
+	assertDoHErrorChainOmits(t, err, "private-provider-token", "api_key=private", "private-fragment")
+}
+
+func TestDoHHTTPErrorDropsNestedURLWrappers(t *testing.T) {
+	endpoint := "https://resolver.example:4443/private-http-token/dns-query?api_key=private#private-fragment"
+	sentinel := errors.New("network unreachable")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &url.Error{
+			Op:  "round-trip",
+			URL: endpoint,
+			Err: &url.Error{Op: "dial", URL: endpoint, Err: sentinel},
+		}
+	})}
+	resolver := &dohResolver{}
+	_, err := resolver.queryUpstream(context.Background(), endpoint, dohUpstream{client: client}, make([]byte, 12))
+	if err == nil {
+		t.Fatal("expected DoH HTTP failure")
+	}
+	if !strings.Contains(err.Error(), "round-trip") || !strings.Contains(err.Error(), "dial") || !strings.Contains(err.Error(), "network unreachable") {
+		t.Fatalf("underlying DoH HTTP evidence was lost: %v", err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("DoH HTTP error lost its underlying cause: %v", err)
+	}
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		t.Fatalf("DoH HTTP error chain retained URL-bearing error %q", requestError.URL)
+	}
+	assertDoHErrorChainOmits(t, err, "private-http-token", "api_key=private", "private-fragment")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func assertDoHErrorChainOmits(t *testing.T, err error, secrets ...string) {
+	t.Helper()
+	var walk func(error)
+	walk = func(current error) {
+		if current == nil {
+			return
+		}
+		for _, secret := range secrets {
+			if strings.Contains(current.Error(), secret) {
+				t.Fatalf("DoH error chain leaked %q in %T: %s", secret, current, current)
+			}
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, nested := range joined.Unwrap() {
+				walk(nested)
+			}
+			return
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			walk(wrapped.Unwrap())
+		}
+	}
+	walk(err)
 }
 
 func TestDoHProvidersRaceAndFastestValidResponseWins(t *testing.T) {
 	var slowRequests atomic.Int32
 	var fastRequests atomic.Int32
 	var invalidRequests atomic.Int32
-	newProvider := func(delay time.Duration, ip [4]byte, requests *atomic.Int32) *httptest.Server {
+	newProvider := func(delay time.Duration, ip [4]byte, requests *atomic.Int32, prerequisite <-chan struct{}) *httptest.Server {
 		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests.Add(1)
 			query, _ := io.ReadAll(r.Body)
+			if prerequisite != nil {
+				select {
+				case <-prerequisite:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			select {
 			case <-time.After(delay):
 			case <-r.Context().Done():
@@ -330,12 +406,13 @@ func TestDoHProvidersRaceAndFastestValidResponseWins(t *testing.T) {
 			_, _ = w.Write(answer)
 		}))
 	}
-	slow := newProvider(300*time.Millisecond, [4]byte{192, 0, 2, 10}, &slowRequests)
+	slow := newProvider(300*time.Millisecond, [4]byte{192, 0, 2, 10}, &slowRequests, nil)
 	defer slow.Close()
-	fast := newProvider(15*time.Millisecond, [4]byte{192, 0, 2, 20}, &fastRequests)
-	defer fast.Close()
+	invalidStarted := make(chan struct{})
+	var invalidStartedOnce sync.Once
 	invalid := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		invalidRequests.Add(1)
+		invalidStartedOnce.Do(func() { close(invalidStarted) })
 		query, _ := io.ReadAll(r.Body)
 		answer, _ := dnsTestResponseIPv4(query, [4]byte{192, 0, 2, 99})
 		binary.BigEndian.PutUint16(answer[2:4], 0x8182) // SERVFAIL must not win the race.
@@ -343,6 +420,11 @@ func TestDoHProvidersRaceAndFastestValidResponseWins(t *testing.T) {
 		_, _ = w.Write(answer)
 	}))
 	defer invalid.Close()
+	// Do not let scheduler/TLS timing cancel the invalid request before its
+	// handler runs; the test specifically verifies that a completed invalid
+	// response cannot win the provider race.
+	fast := newProvider(15*time.Millisecond, [4]byte{192, 0, 2, 20}, &fastRequests, invalidStarted)
+	defer fast.Close()
 	srv := New(config.Server{DNS: config.DNS{IPv4Only: true, DoH: &config.DoH{
 		URLs: []string{slow.URL, invalid.URL, fast.URL}, Timeout: config.Duration(time.Second), InsecureSkipVerify: true,
 	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))

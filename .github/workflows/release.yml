@@ -35,29 +35,53 @@ jobs:
           test -x openwrt/wwan-proxy.init
           sh -n openwrt/wwan-proxy.init
 
+      - name: Validate Alpine installer and OpenRC files
+        run: |
+          test -x scripts/install-alpine.sh
+          test -x alpine/wwan-proxy.openrc
+          sh -n scripts/install-alpine.sh
+          sh -n alpine/wwan-proxy.openrc
+          test -s alpine/wwan-proxy.confd
+          test -s alpine/wwan-proxy.logrotate
+
+      - name: Validate scripts with Alpine 3.23 BusyBox ash
+        run: |
+          docker run --rm \
+            --volume "${PWD}:/src:ro" \
+            alpine:3.23 \
+            sh -ec 'sh -n /src/scripts/install-alpine.sh; sh -n /src/alpine/wwan-proxy.openrc'
+
       - name: Run race-enabled tests
         run: go test -race ./...
 
   build:
     name: Build ${{ matrix.package_name }}
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - goarch: amd64
+            runner: ubuntu-24.04
             cc: gcc
             libc: glibc
             package_name: wwan-proxy-linux-amd64
           - goarch: arm64
-            cc: aarch64-linux-gnu-gcc
+            runner: ubuntu-24.04-arm
+            cc: gcc
             libc: glibc
             package_name: wwan-proxy-linux-arm64
           - goarch: amd64
+            runner: ubuntu-24.04
             cc: musl-gcc
             libc: musl
             package_name: wwan-proxy-linux-amd64-musl
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+            cc: musl-gcc
+            libc: musl
+            package_name: wwan-proxy-linux-arm64-musl
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -67,12 +91,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Install ARM64 cross compiler
-        if: matrix.goarch == 'arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes gcc-aarch64-linux-gnu
 
       - name: Install musl toolchain
         if: matrix.libc == 'musl'
@@ -107,7 +125,43 @@ jobs:
             ./cmd/wwan-proxy
           cp README.md wwan-proxy.service "${package_dir}/"
           cp openwrt/wwan-proxy.init "${package_dir}/"
+          cp scripts/install-alpine.sh "${package_dir}/"
+          cp alpine/wwan-proxy.openrc alpine/wwan-proxy.confd alpine/wwan-proxy.logrotate "${package_dir}/"
           tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+
+      - name: Verify release package contents
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        run: |
+          set -euo pipefail
+          archive="dist/${PACKAGE_NAME}.tar.gz"
+          contents="dist/${PACKAGE_NAME}.contents"
+          tar -tzf "${archive}" > "${contents}"
+          for expected in \
+            wwan-proxy README.md wwan-proxy.service wwan-proxy.init \
+            install-alpine.sh wwan-proxy.openrc wwan-proxy.confd wwan-proxy.logrotate
+          do
+            grep --fixed-strings --line-regexp --quiet "${PACKAGE_NAME}/${expected}" "${contents}"
+          done
+
+      - name: Smoke-test musl package on Alpine 3.23
+        if: matrix.libc == 'musl'
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            sha256sum "./${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.SHA256SUMS"
+          )
+          docker run --rm \
+            --cap-add SETFCAP \
+            --volume "${PWD}:/workspace:ro" \
+            alpine:3.23 \
+            sh /workspace/scripts/install-alpine.sh \
+              --archive "/workspace/dist/${PACKAGE_NAME}.tar.gz" \
+              --checksum "/workspace/dist/${PACKAGE_NAME}.SHA256SUMS" \
+              --no-start
 
       - name: Verify static musl binary
         if: matrix.libc == 'musl'

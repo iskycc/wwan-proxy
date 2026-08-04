@@ -432,3 +432,96 @@ func TestCloseTerminatesHijackedConnectTunnel(t *testing.T) {
 		t.Fatalf("CONNECT handler remained active: %+v", proxy.Metrics())
 	}
 }
+
+func TestGracefulCloseDrainsHijackedConnectTunnel(t *testing.T) {
+	origin := listenEcho(t)
+	defer origin.Close()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := New(config.Server{
+		Auth: config.Auth{Method: "none"}, IdleTimeout: config.Duration(time.Minute),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), (&net.Dialer{Timeout: time.Second}).DialContext)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- proxy.Serve(context.Background(), ln) }()
+	<-proxy.Ready()
+
+	client, err := net.DialTimeout("tcp4", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, _ = fmt.Fprintf(client, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", origin.Addr(), origin.Addr())
+	reader := bufio.NewReader(client)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	proxy.StopAccepting()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HTTP listener did not stop accepting")
+	}
+	payload := []byte("tunnel-survives-listener-handoff")
+	if _, err := client.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("tunnel returned %q", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	gracefulDone := make(chan error, 1)
+	go func() { gracefulDone <- proxy.GracefulClose(ctx) }()
+	select {
+	case err := <-gracefulDone:
+		t.Fatalf("graceful close returned before tunnel drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = client.Close()
+	select {
+	case err := <-gracefulDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("graceful close did not finish after tunnel closed")
+	}
+}
+
+func listenEcho(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				_, _ = io.Copy(conn, conn)
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return ln
+}

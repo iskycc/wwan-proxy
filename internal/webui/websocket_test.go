@@ -75,8 +75,10 @@ func TestOverviewWebSocketAuthenticationPushRefreshAndLogout(t *testing.T) {
 	}
 	defer connection.Close(websocket.StatusNormalClosure, "")
 	type overviewMessage struct {
-		Servers []config.Server `json:"servers"`
-		Process struct {
+		ServiceInstanceID string          `json:"service_instance_id"`
+		SampledAt         time.Time       `json:"sampled_at"`
+		Servers           []config.Server `json:"servers"`
+		Process           struct {
 			HeapBytes        uint64 `json:"heap_bytes"`
 			WebSocketClients int64  `json:"websocket_clients"`
 		} `json:"process"`
@@ -88,7 +90,7 @@ func TestOverviewWebSocketAuthenticationPushRefreshAndLogout(t *testing.T) {
 		t.Fatal(err)
 	}
 	readCancel()
-	if len(first.Servers) != 1 || first.Servers[0].Name != "websocket-test" || first.Process.HeapBytes == 0 || first.Process.WebSocketClients != 1 {
+	if first.ServiceInstanceID == "" || first.SampledAt.IsZero() || len(first.Servers) != 1 || first.Servers[0].Name != "websocket-test" || first.Process.HeapBytes == 0 || first.Process.WebSocketClients != 1 {
 		t.Fatalf("unexpected initial WebSocket overview: %+v", first)
 	}
 
@@ -107,6 +109,9 @@ func TestOverviewWebSocketAuthenticationPushRefreshAndLogout(t *testing.T) {
 	readCancel()
 	if len(refreshed.Servers) != 1 {
 		t.Fatalf("manual refresh returned unexpected overview: %+v", refreshed)
+	}
+	if refreshed.ServiceInstanceID != first.ServiceInstanceID || refreshed.SampledAt.Before(first.SampledAt) {
+		t.Fatalf("overview sample identity/time changed unexpectedly: first=%+v refreshed=%+v", first, refreshed)
 	}
 
 	crossOriginHeader := make(http.Header)

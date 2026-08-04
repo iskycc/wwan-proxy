@@ -67,7 +67,7 @@
 
       <section class="page active" id="page-overview">
         <div class="hero glass-card">
-          <div class="hero-copy"><span class="hero-label" id="hero-status"><i></i><b>SYSTEM OPERATIONAL</b></span><h2>每一条链路，<br><em>都在掌控之中。</em></h2><p>SOCKS5、HTTP/HTTPS、UDP、DNS 与 DoH 流量严格绑定指定 WWAN 出口，状态按每个实例的心跳策略自动验证。</p><div class="hero-chips"><span>SO_BINDTODEVICE</span><span>独立健康检测</span><span>SQLite 持久化</span></div></div>
+          <div class="hero-copy"><span class="hero-label" id="hero-status"><i></i><b>SYSTEM OPERATIONAL</b></span><h2>每一条链路，<br><em>都在掌控之中。</em></h2><p>SOCKS5、HTTP/HTTPS、UDP、DNS 与 DoH 流量严格绑定指定出口网口，状态按每个实例的心跳策略自动验证。</p><div class="hero-chips"><span>SO_BINDTODEVICE</span><span>独立健康检测</span><span>SQLite 持久化</span></div></div>
           <div class="network-viz" aria-label="健康出口拓扑"><div class="viz-halo halo-one"></div><div class="viz-halo halo-two"></div><i class="viz-node node-a"></i><i class="viz-node node-b"></i><i class="viz-node node-c"></i><i class="viz-node node-d"></i><div class="viz-core"><span id="hero-healthy">0</span><small>健康出口</small></div></div>
         </div>
         <div class="kpi-grid">
@@ -116,6 +116,7 @@
             <div class="settings-fields">
               <label>WebUI 监听地址<input required name="web_listen" placeholder="127.0.0.1:9090"><small>修改后需要重启服务</small></label>
               <label>SQLite 数据库路径<input required name="database_path" placeholder="/var/lib/wwan-proxy/wwan-proxy.db"><small id="database-path-note">必须使用绝对路径，重启时自动迁移</small></label>
+              <label>最低日志级别<select class="native-select" required name="log_level"><option value="WARN">WARN · 仅警告和错误（推荐）</option><option value="ERROR">ERROR · 仅错误</option><option value="INFO">INFO · 常规运行信息</option><option value="DEBUG">DEBUG · 完整诊断</option></select><small>即时过滤控制台与 SQLite，默认 WARN</small></label>
               <label>日志保留天数<input required type="number" min="1" max="3650" name="log_retention_days"><small>保存后立即执行过期清理</small></label>
               <label>登录会话有效期<input required name="session_lifetime" placeholder="24h"><small>适用于之后创建的新会话</small></label>
             </div>
@@ -150,20 +151,30 @@
       <div class="modal-head"><div><p class="eyebrow">SERVER CONFIGURATION</p><h3 id="modal-title">新建出口</h3></div><button type="button" class="icon-button" id="modal-close">×</button></div>
       <input type="hidden" name="id">
       <div class="form-grid">
-        <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>SOCKS5、HTTP/HTTPS Proxy、出口接口与连接限制</span></div></div>
+        <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>SOCKS5、HTTP/HTTPS Proxy、出口网口与连接限制</span></div></div>
         <label>名称<input required name="name" placeholder="wwan0"></label>
-        <label>出口接口<input required name="interface" placeholder="wwan0"></label>
+        <label>出口网口（物理 / 虚拟均可）<input required name="interface" list="network-interfaces" placeholder="如 eth0、enp3s0、wwan0"><small>直接填写 Linux 网口名；候选项来自本机实时发现。</small></label>
+        <datalist id="network-interfaces"></datalist>
         <label>SOCKS5 监听<input required name="listen" value="0.0.0.0:1080"></label>
         <label class="toggle-label"><input type="checkbox" name="http_proxy_enabled"><span></span>启用 HTTP / HTTPS Proxy</label>
         <label class="http-proxy-field">HTTP Proxy 监听<input name="http_proxy_listen" value="0.0.0.0:8080" placeholder="0.0.0.0:8080"></label>
         <label>最大连接数<input type="number" min="0" name="max_connections" value="1024"></label>
         <label>连接超时<input name="connect_timeout" value="10s"></label>
         <label>空闲超时<input name="idle_timeout" value="5m"></label>
-        <label>SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
+        <label class="toggle-label"><input type="checkbox" name="bind_enabled"><span></span>启用 SOCKS5 BIND（默认关闭）</label>
+	        <label class="bind-field">SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
+	        <label class="bind-field">BIND 广播 IP<input name="bind_advertise" value="auto"><small>auto 优先选择网口的全局单播地址；多地址或 NAT 环境可显式填写。</small></label>
         <div class="form-section-heading span-2"><i>02</i><div><strong>访问认证</strong><span>SOCKS5 与 HTTP Proxy 共用访问凭据</span></div></div>
         <label>认证方式<select class="native-select" name="auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
-        <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'></label>
-        <div class="form-section-heading span-2"><i>03</i><div><strong>名称解析</strong><span>系统 DNS、传统 DNS 或绑定接口的 DoH</span></div></div>
+	        <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'><small>编辑时空密码表示保持原密码；输入 ******** 会保存为真实密码。</small></label>
+        <div class="span-2 security-warning" id="proxy-security-warning">监听非回环地址且无需认证会暴露代理；请使用认证、来源 CIDR 或主机防火墙限制访问。</div>
+        <div class="form-section-heading span-2"><i>03</i><div><strong>访问控制</strong><span>限制入口来源和目标；规则按顺序匹配</span></div></div>
+        <label class="span-2">入口来源 CIDR<input name="admission_cidrs" placeholder="10.0.0.0/8, 192.168.0.0/16"><small>留空允许所有来源；仅接受 IPv4 / IPv6 CIDR。</small></label>
+        <label>目标默认动作<select class="native-select" name="target_default"><option value="allow">允许</option><option value="deny">拒绝</option></select></label>
+	        <label>每来源 IP 最大连接<input type="number" min="0" name="max_connections_per_ip" value="64"><small>新配置建议保留限制；0 表示不限。</small></label>
+	        <label>每来源 IP 最大 UDP 会话<input type="number" min="0" name="max_udp_associations_per_ip" value="4"><small>固定池的总并发还受可绑定端口数限制；0 表示不限。</small></label>
+        <label class="span-2">目标 ACL（每行一条）<textarea name="target_rules" rows="4" placeholder="deny *.example.com:443&#10;deny 192.0.2.0/24:1-1023&#10;allow *"></textarea><small>语法：allow|deny 目标[:端口或范围]；目标支持域名、*.域名、IP、CIDR 和 *。</small></label>
+        <div class="form-section-heading span-2"><i>04</i><div><strong>名称解析</strong><span>系统 DNS、传统 DNS 或绑定网口的 DoH</span></div></div>
         <label>DNS 模式<select class="native-select" name="dns_mode"><option value="system">系统 DNS</option><option value="servers">传统 DNS</option><option value="doh">DoH</option></select></label>
         <label class="toggle-label"><input type="checkbox" name="dns_ipv4_only"><span></span>域名仅解析 IPv4（不请求 AAAA）</label>
         <label class="span-2 dns-servers-field">DNS 服务器<input name="dns_servers" placeholder="1.1.1.1:53, 8.8.8.8:53"></label>
@@ -171,15 +182,18 @@
         <label class="span-2 doh-field">DoH Bootstrap DNS<input name="doh_bootstrap" placeholder="114.114.114.114, 8.8.8.8"></label>
         <label class="doh-field">DoH 超时<input name="doh_timeout" value="10s"></label>
         <label class="toggle-label doh-field"><input type="checkbox" name="doh_insecure"><span></span>跳过 DoH TLS 校验</label>
-        <div class="form-section-heading span-2"><i>04</i><div><strong>UDP Relay</strong><span>每个会话从配置范围内自动选择空闲端口</span></div></div>
-        <label class="toggle-label"><input type="checkbox" name="udp_enabled" checked><span></span>启用 UDP ASSOCIATE</label>
+	        <div class="form-section-heading span-2"><i>05</i><div><strong>UDP Relay</strong><span>使用标准 UDP ASSOCIATE；支持不连续的固定端口池</span></div></div>
+	        <label class="toggle-label"><input type="checkbox" name="udp_enabled" checked><span></span>启用 UDP ASSOCIATE</label>
+	        <label>最大 UDP 会话数<input type="number" min="1" max="65535" name="udp_max_associations" value="64"><small>实例级硬上限，热重载期间也与旧会话共用。</small></label>
+	        <label class="toggle-label"><input type="checkbox" name="udp_strict_endpoint"><span></span>严格校验目标 IP 与端口<small>默认只锁定目标 IP，以兼容 TFTP 等换端口回复。</small></label>
         <label>UDP 监听 IP<input name="udp_bind_ip" value="0.0.0.0"></label>
         <label>UDP 广播 IP<input name="udp_advertise" value="auto"></label>
         <label>UDP 空闲超时<input name="udp_idle_timeout" value="2m"></label>
-        <label>UDP 最小端口<input type="number" min="1024" max="65535" name="udp_port_min" value="10000"></label>
-        <label>UDP 最大端口<input type="number" min="1024" max="65535" name="udp_port_max" value="65535"></label>
+	        <label>UDP 固定 Relay 端口池<input name="udp_relay_ports" placeholder="如 12000, 12007, 53000"><small>逗号或空格分隔，最多 4096 个；留空时按下方范围随机。每个端口同时只分配给一个会话。</small></label>
+        <label class="udp-range-field">UDP 最小端口<input type="number" min="1024" max="65535" name="udp_port_min" value="10000"></label>
+        <label class="udp-range-field">UDP 最大端口<input type="number" min="1024" max="65535" name="udp_port_max" value="65535"></label>
         <label class="span-2">广播地址映射 JSON<input name="udp_map" placeholder='{"192.168.1.1":"203.0.113.10"}'></label>
-        <div class="form-section-heading span-2"><i>05</i><div><strong>出口心跳</strong><span>健康检查同样通过当前 WWAN 接口发出</span></div></div>
+        <div class="form-section-heading span-2"><i>06</i><div><strong>出口心跳</strong><span>健康检查同样通过当前出口网口发出</span></div></div>
         <label class="span-2">心跳 URL<input required name="heartbeat_url" value="https://1.1.1.1/cdn-cgi/trace"></label>
         <label>心跳间隔<input required name="heartbeat_interval" value="30s"></label>
         <label>心跳超时<input required name="heartbeat_timeout" value="12s"></label>
