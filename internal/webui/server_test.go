@@ -82,7 +82,7 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if !strings.Contains(string(b), "wwan-test") || !strings.Contains(string(b), "heap_bytes") {
+	if !strings.Contains(string(b), "wwan-test") || !strings.Contains(string(b), "heap_bytes") || !strings.Contains(string(b), "heap_live_bytes") {
 		t.Fatalf("unexpected overview %s", b)
 	}
 

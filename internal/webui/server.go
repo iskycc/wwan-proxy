@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"strconv"
 	"strings"
 	"time"
@@ -82,9 +83,15 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
+	liveHeapSample := []runtimemetrics.Sample{{Name: "/gc/heap/live:bytes"}}
+	runtimemetrics.Read(liveHeapSample)
+	var liveHeap uint64
+	if liveHeapSample[0].Value.Kind() == runtimemetrics.KindUint64 {
+		liveHeap = liveHeapSample[0].Value.Uint64()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": configs, "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
-		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC},
+		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC},
 	})
 }
 
