@@ -164,9 +164,20 @@
         <label class="toggle-label"><input type="checkbox" name="bind_enabled"><span></span>启用 SOCKS5 BIND（默认关闭）</label>
 	        <label class="bind-field">SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
 	        <label class="bind-field">BIND 广播 IP<input name="bind_advertise" value="auto"><small>auto 优先选择网口的全局单播地址；多地址或 NAT 环境可显式填写。</small></label>
+        <div class="form-section-heading span-2"><i>01b</i><div><strong>上游代理</strong><span>链式 SOCKS5 上游；启用后 BIND 与 UDP ASSOCIATE 不可用</span></div></div>
+        <label class="toggle-label span-2"><input type="checkbox" name="upstream_enabled"><span></span>启用上游 SOCKS5 代理</label>
+        <label class="upstream-field">上游地址<input name="upstream_address" placeholder="10.0.0.1:1080"><small>上级 SOCKS5 监听地址，流量经本出口网口转发到该地址</small></label>
+        <label class="upstream-field">上游认证方式<select class="native-select" name="upstream_auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
+        <label class="upstream-field upstream-auth-field">上游用户名<input name="upstream_username" placeholder="user"></label>
+        <label class="upstream-field upstream-auth-field">上游密码<input type="password" name="upstream_password" placeholder="保存时填写"><small>编辑时留空表示不修改密码</small></label>
         <div class="form-section-heading span-2"><i>02</i><div><strong>访问认证</strong><span>SOCKS5 与 HTTP Proxy 共用访问凭据</span></div></div>
         <label>认证方式<select class="native-select" name="auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>
-	        <label class="auth-users-field">用户 JSON<input name="auth_users" placeholder='{"user":"password"}'><small>编辑时空密码表示保持原密码；输入 ******** 会保存为真实密码。</small></label>
+        <div class="auth-users-field span-2">
+          <label>本地代理用户</label>
+          <div class="kv-table" id="auth-users-list"></div>
+          <button type="button" class="secondary-button" id="auth-users-add">＋ 添加用户</button>
+          <small>新增用户必须填写密码；编辑已有用户时留空表示保持原密码。</small>
+        </div>
         <div class="span-2 security-warning" id="proxy-security-warning">监听非回环地址且无需认证会暴露代理；请使用认证、来源 CIDR 或主机防火墙限制访问。</div>
         <div class="form-section-heading span-2"><i>03</i><div><strong>访问控制</strong><span>限制入口来源和目标；规则按顺序匹配</span></div></div>
         <label class="span-2">入口来源 CIDR<input name="admission_cidrs" placeholder="10.0.0.0/8, 192.168.0.0/16"><small>留空允许所有来源；仅接受 IPv4 / IPv6 CIDR。</small></label>
@@ -192,7 +203,12 @@
 	        <label>UDP 固定 Relay 端口池<input name="udp_relay_ports" placeholder="如 12000, 12007, 53000"><small>逗号或空格分隔，最多 4096 个；留空时按下方范围随机。每个端口同时只分配给一个会话。</small></label>
         <label class="udp-range-field">UDP 最小端口<input type="number" min="1024" max="65535" name="udp_port_min" value="10000"></label>
         <label class="udp-range-field">UDP 最大端口<input type="number" min="1024" max="65535" name="udp_port_max" value="65535"></label>
-        <label class="span-2">广播地址映射 JSON<input name="udp_map" placeholder='{"192.168.1.1":"203.0.113.10"}'></label>
+        <div class="span-2">
+          <label>UDP 广播地址映射</label>
+          <div class="kv-table" id="udp-map-list"></div>
+          <button type="button" class="secondary-button" id="udp-map-add">＋ 添加映射</button>
+          <small>当 UDP 监听地址为内网 IP 时，指定对外广播的公网 IP。</small>
+        </div>
         <div class="form-section-heading span-2"><i>06</i><div><strong>出口心跳</strong><span>健康检查同样通过当前出口网口发出</span></div></div>
         <label class="span-2">心跳 URL<input required name="heartbeat_url" value="https://1.1.1.1/cdn-cgi/trace"></label>
         <label>心跳间隔<input required name="heartbeat_interval" value="30s"></label>
