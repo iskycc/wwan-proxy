@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# One-click installer for wwan-proxy on Alpine Linux 3.23.
+# One-click installer for wwan-proxy on Alpine Linux 3.21-3.23.
 # BusyBox ash compatible: intentionally avoids Bash-only syntax.
 # ShellCheck cannot see trap callbacks and pgrep is not guaranteed in BusyBox.
 # shellcheck disable=SC2009,SC2329
@@ -10,7 +10,8 @@ set -u
 PROGRAM_NAME="install-alpine.sh"
 SERVICE_NAME="wwan-proxy"
 DEFAULT_REPOSITORY="iskycc/wwan-proxy"
-SUPPORTED_ALPINE_SERIES="3.23"
+SUPPORTED_ALPINE_SERIES="3.21 3.22 3.23"
+SUPPORTED_ALPINE_DISPLAY="3.21.x through 3.23.x"
 DEFAULT_HEALTH_URL="http://127.0.0.1:9090/api/health"
 ALPINE_WEB_DEFAULT="0.0.0.0:9090"
 
@@ -91,7 +92,7 @@ usage() {
 Usage:
   install-alpine.sh [options]
 
-Install or upgrade wwan-proxy on Alpine Linux 3.23 using a verified musl
+Install or upgrade wwan-proxy on Alpine Linux 3.21-3.23 using a verified musl
 release package and an OpenRC service.
 
 Options:
@@ -107,7 +108,7 @@ Options:
   --skip-firewall        Skip host firewall inspection and changes
   --no-start             Install files without starting OpenRC; firewall work
                          is deferred until a later normal installer run
-  --force-os             Allow an Alpine release other than 3.23
+  --force-os             Allow an Alpine release outside 3.21-3.23
   -h, --help             Show this help
 
 Environment equivalents:
@@ -293,6 +294,16 @@ is_true() {
 		1|yes|true|on|YES|TRUE|ON) return 0 ;;
 		*) return 1 ;;
 	esac
+}
+
+is_supported_alpine_release() {
+	candidate_release=$1
+	for supported_series in ${SUPPORTED_ALPINE_SERIES}; do
+		case "${candidate_release}" in
+			${supported_series}.*) return 0 ;;
+		esac
+	done
+	return 1
 }
 
 is_root_safe_file() {
@@ -1795,22 +1806,19 @@ log_line DEBUG "work_directory=${WORK_DIR}"
 
 if [ ! -r /etc/alpine-release ]; then
 	if ! is_true "${FORCE_OS}"; then
-		fatal "this installer requires Alpine Linux ${SUPPORTED_ALPINE_SERIES}.x; /etc/alpine-release is missing"
+		fatal "this installer requires Alpine Linux ${SUPPORTED_ALPINE_DISPLAY}; /etc/alpine-release is missing"
 	fi
 	ALPINE_RELEASE="unknown"
 	log_line WARN "--force-os accepted a system without /etc/alpine-release"
 else
 	ALPINE_RELEASE=$(cat /etc/alpine-release)
-	case "${ALPINE_RELEASE}" in
-		${SUPPORTED_ALPINE_SERIES}.*) ;;
-		*)
-			if is_true "${FORCE_OS}"; then
-				log_line WARN "unsupported Alpine release ${ALPINE_RELEASE} accepted because --force-os was supplied"
-			else
-				fatal "Alpine ${ALPINE_RELEASE} is not supported; expected ${SUPPORTED_ALPINE_SERIES}.x (use --force-os only after testing)"
-			fi
-			;;
-	esac
+	if ! is_supported_alpine_release "${ALPINE_RELEASE}"; then
+		if is_true "${FORCE_OS}"; then
+			log_line WARN "unsupported Alpine release ${ALPINE_RELEASE} accepted because --force-os was supplied"
+		else
+			fatal "Alpine ${ALPINE_RELEASE} is not supported; expected ${SUPPORTED_ALPINE_DISPLAY} (use --force-os only after testing)"
+		fi
+	fi
 fi
 
 if ! command -v apk >/dev/null 2>&1; then

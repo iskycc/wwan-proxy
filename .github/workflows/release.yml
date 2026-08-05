@@ -46,12 +46,14 @@ jobs:
           test -s alpine/wwan-proxy.confd
           test -s alpine/wwan-proxy.logrotate
 
-      - name: Validate scripts with Alpine 3.23 BusyBox ash
+      - name: Validate scripts with supported Alpine BusyBox ash
         run: |
-          docker run --rm \
-            --volume "${PWD}:/src:ro" \
-            alpine:3.23 \
-            sh -ec 'sh -n /src/scripts/install-alpine.sh; sh -n /src/alpine/wwan-proxy.openrc'
+          for alpine_version in 3.21 3.22 3.23; do
+            docker run --rm \
+              --volume "${PWD}:/src:ro" \
+              "alpine:${alpine_version}" \
+              sh -ec 'sh -n /src/scripts/install-alpine.sh; sh -n /src/alpine/wwan-proxy.openrc'
+          done
 
       - name: Run race-enabled tests
         run: go test -race ./...
@@ -146,7 +148,7 @@ jobs:
             grep --fixed-strings --line-regexp --quiet "${PACKAGE_NAME}/${expected}" "${contents}"
           done
 
-      - name: Smoke-test musl package on Alpine 3.23
+      - name: Smoke-test musl package on supported Alpine releases
         if: matrix.libc == 'musl'
         env:
           PACKAGE_NAME: ${{ matrix.package_name }}
@@ -156,51 +158,53 @@ jobs:
             cd dist
             sha256sum "./${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.SHA256SUMS"
           )
-          docker run --rm \
-            --cap-add SETFCAP \
-            --volume "${PWD}:/workspace:ro" \
-            alpine:3.23 \
-            sh -ec '
-              sh /workspace/scripts/install-alpine.sh \
-                --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
-                --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
-                --no-start
-              listener=$(/usr/local/bin/wwan-proxy \
-                -db /tmp/wwan-proxy-listener-test.db \
-                -web-default 0.0.0.0:9090 \
-                -print-web-listen)
-              test "${listener}" = 0.0.0.0:9090
-              grep -q -- "-web-default 0.0.0.0:9090" /etc/init.d/wwan-proxy
-              test ! -e /etc/nftables.d/50_wwan-proxy.nft
-              grep -Fq -- "--no-start selected; service was not enabled or started, and firewall inspection or changes were deferred" /var/log/wwan-proxy-install.log
+          for alpine_version in 3.21 3.22 3.23; do
+            docker run --rm \
+              --cap-add SETFCAP \
+              --volume "${PWD}:/workspace:ro" \
+              "alpine:${alpine_version}" \
+              sh -ec '
+                sh /workspace/scripts/install-alpine.sh \
+                  --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                  --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                  --no-start
+                listener=$(/usr/local/bin/wwan-proxy \
+                  -db /tmp/wwan-proxy-listener-test.db \
+                  -web-default 0.0.0.0:9090 \
+                  -print-web-listen)
+                test "${listener}" = 0.0.0.0:9090
+                grep -q -- "-web-default 0.0.0.0:9090" /etc/init.d/wwan-proxy
+                test ! -e /etc/nftables.d/50_wwan-proxy.nft
+                grep -Fq -- "--no-start selected; service was not enabled or started, and firewall inspection or changes were deferred" /var/log/wwan-proxy-install.log
 
-              /usr/local/bin/wwan-proxy \
-                -db /tmp/wwan-proxy-live-listener-test.db \
-                -web-default 0.0.0.0:9090 \
-                >/tmp/wwan-proxy-live-listener-test.log 2>&1 &
-              server_pid=$!
-              trap '"'"'kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true'"'"' EXIT
-              container_ipv4=$(hostname -i | awk '"'"'{ print $1 }'"'"')
-              test -n "${container_ipv4}"
-              for attempt in $(seq 1 30); do
-                if curl -fsS http://127.0.0.1:9090/api/health >/dev/null && \
-                  curl -fsS "http://${container_ipv4}:9090/api/health" >/dev/null
-                then
-                  listener_ready=1
-                  break
+                /usr/local/bin/wwan-proxy \
+                  -db /tmp/wwan-proxy-live-listener-test.db \
+                  -web-default 0.0.0.0:9090 \
+                  >/tmp/wwan-proxy-live-listener-test.log 2>&1 &
+                server_pid=$!
+                trap '"'"'kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true'"'"' EXIT
+                container_ipv4=$(hostname -i | awk '"'"'{ print $1 }'"'"')
+                test -n "${container_ipv4}"
+                for attempt in $(seq 1 30); do
+                  if curl -fsS http://127.0.0.1:9090/api/health >/dev/null && \
+                    curl -fsS "http://${container_ipv4}:9090/api/health" >/dev/null
+                  then
+                    listener_ready=1
+                    break
+                  fi
+                  sleep 1
+                done
+                test "${listener_ready:-0}" -eq 1
+                grep -Eq '"'"'^[[:space:]]*[0-9]+:[[:space:]]+00000000:2382[[:space:]]'"'"' /proc/net/tcp
+                if grep -Eq '"'"':2382[[:space:]]'"'"' /proc/net/tcp6; then
+                  echo "IPv4 literal listener unexpectedly opened an IPv6 wildcard socket" >&2
+                  exit 1
                 fi
-                sleep 1
-              done
-              test "${listener_ready:-0}" -eq 1
-              grep -Eq '"'"'^[[:space:]]*[0-9]+:[[:space:]]+00000000:2382[[:space:]]'"'"' /proc/net/tcp
-              if grep -Eq '"'"':2382[[:space:]]'"'"' /proc/net/tcp6; then
-                echo "IPv4 literal listener unexpectedly opened an IPv6 wildcard socket" >&2
-                exit 1
-              fi
-              kill "${server_pid}"
-              wait "${server_pid}" || true
-              trap - EXIT
-            '
+                kill "${server_pid}"
+                wait "${server_pid}" || true
+                trap - EXIT
+              '
+          done
 
       - name: Verify static musl binary
         if: matrix.libc == 'musl'

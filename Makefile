@@ -22,6 +22,7 @@ check-scripts:
 	test -x alpine/wwan-proxy.openrc
 	test -s alpine/wwan-proxy.confd
 	test -s alpine/wwan-proxy.logrotate
+	grep -F 'SUPPORTED_ALPINE_SERIES="3.21 3.22 3.23"' scripts/install-alpine.sh
 	grep -F 'WWAN_PROXY_NPROC_LIMIT="unlimited"' alpine/wwan-proxy.confd
 	grep -F -- '-u $${WWAN_PROXY_NPROC_LIMIT:-unlimited}' alpine/wwan-proxy.openrc
 

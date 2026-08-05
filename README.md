@@ -59,9 +59,9 @@ GitHub Actions 会在每次提交到 `main` 后自动执行以下流程：
 
 也可以在仓库的 Actions 页面手动运行同一流程。重复运行同一提交时会更新原 Release 的附件，不会创建重复标签。
 
-### Alpine Linux 3.23 一键安装
+### Alpine Linux 3.21–3.23 一键安装
 
-Alpine 3.23 使用 OpenRC。先进入 root shell，再执行全新安装或升级：
+Alpine 3.21、3.22 和 3.23 使用 OpenRC。先进入 root shell，再执行全新安装或升级：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-alpine.sh | sh
@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
 
 其他架构会明确退出，不会回退到无法在 Alpine 可靠运行的 glibc 包。安装器还会完成以下工作：
 
-- 严格检查 Alpine `3.23.x`、CPU 架构和 Release 包内容；
+- 严格检查 Alpine `3.21.x`–`3.23.x`、CPU 架构和 Release 包内容；
 - 从同一个 Release 下载程序与 `SHA256SUMS`，精确校验目标资产后才解包；
 - 安装 OpenRC、CA 证书、`libcap-utils` 和日志轮转依赖，创建非 root 的 `wwan-proxy` 系统用户；
 - 将 `cap_net_raw=ep` 只授予服务程序，以支持 `SO_BINDTODEVICE`，并验证 capability 确实生效；
