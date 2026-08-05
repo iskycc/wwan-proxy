@@ -229,6 +229,21 @@ func (s *Server) udpAdvertiseIP(controlLocal net.IP) (net.IP, error) {
 	if !sameUDPIPFamily(bindIP, controlLocal) {
 		return nil, fmt.Errorf("control connection local IP %q does not match UDP bind address family", controlLocal)
 	}
+	// When the control connection local address is not externally reachable
+	// (e.g. a cloud VM behind 1:1 NAT or a container with only a private IP),
+	// advertising it to an external SOCKS5 client would make the UDP relay
+	// unusable. Try to find a public address on a local interface first.
+	if !isPublicUnicastIP(controlLocal) {
+		publicIP, findErr := publicInterfaceIPFunc(bindIP.To4() != nil)
+		if findErr == nil {
+			return publicIP, nil
+		}
+		family := "IPv4"
+		if bindIP.To4() == nil {
+			family = "IPv6"
+		}
+		return nil, fmt.Errorf("control connection local IP %q is not reachable from external SOCKS5 clients and no public %s interface address was found; configure udp.advertise explicitly", controlLocal, family)
+	}
 	return controlLocal, nil
 }
 
@@ -306,6 +321,93 @@ func validateUDPReplyIP(ip net.IP, source string) (net.IP, error) {
 		return nil, fmt.Errorf("%s is not a usable SOCKS5 UDP relay address", source)
 	}
 	return ip, nil
+}
+
+// publicInterfaceIPFunc is the implementation used by udpAdvertiseIP to
+// discover a public interface address. It is a package variable so tests can
+// substitute a deterministic stub.
+var publicInterfaceIPFunc = publicInterfaceIP
+
+// isPublicUnicastIP reports whether ip is a globally routable unicast address
+// that an external SOCKS5 client can use to reach this relay. It rejects
+// unspecified, loopback, link-local, multicast, RFC 1918 private IPv4 and
+// IPv6 unique-local addresses.
+func isPublicUnicastIP(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if !ip.IsGlobalUnicast() {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch ip4[0] {
+		case 10:
+			return false
+		case 172:
+			if ip4[1] >= 16 && ip4[1] <= 31 {
+				return false
+			}
+		case 192:
+			if ip4[1] == 168 {
+				return false
+			}
+		}
+		return true
+	}
+	// IPv6 unique local addresses (fc00::/7).
+	if ip[0]&0xfe == 0xfc {
+		return false
+	}
+	return true
+}
+
+// publicInterfaceIP returns a public unicast IP address of the requested
+// address family (IPv4 when ipv4 is true, IPv6 otherwise) assigned to a local
+// network interface. This is used as a last-resort auto-discovery when the
+// control connection local address is not externally reachable.
+func publicInterfaceIP(ipv4 bool) (net.IP, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list network interfaces: %w", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch a := addr.(type) {
+			case *net.IPNet:
+				ip = a.IP
+			case *net.IPAddr:
+				ip = a.IP
+			default:
+				continue
+			}
+			if ip == nil {
+				continue
+			}
+			if (ip.To4() != nil) != ipv4 {
+				continue
+			}
+			if !isPublicUnicastIP(ip) {
+				continue
+			}
+			return ip, nil
+		}
+	}
+	family := "IPv4"
+	if !ipv4 {
+		family = "IPv6"
+	}
+	return nil, fmt.Errorf("no public %s address found on local interfaces", family)
 }
 
 func (a *udpAssociation) loop(parent context.Context, idle time.Duration) error {

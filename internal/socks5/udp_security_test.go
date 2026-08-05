@@ -435,6 +435,75 @@ func TestUDPAdvertiseValidatesCompleteLegacyConfigBeforeSelection(t *testing.T) 
 	}
 }
 
+func TestIsPublicUnicastIP(t *testing.T) {
+	tests := []struct {
+		ip      string
+		public  bool
+	}{
+		{"0.0.0.0", false},
+		{"127.0.0.1", false},
+		{"10.0.0.1", false},
+		{"172.16.0.1", false},
+		{"172.31.255.255", false},
+		{"192.168.0.1", false},
+		{"169.254.0.1", false},
+		{"224.0.0.1", false},
+		{"1.2.3.4", true},
+		{"203.0.113.1", true},
+		{"::1", false},
+		{"fe80::1", false},
+		{"fc00::1", false},
+		{"ff02::1", false},
+		{"2001:db8::1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ip, func(t *testing.T) {
+			got := isPublicUnicastIP(net.ParseIP(tt.ip))
+			if got != tt.public {
+				t.Fatalf("isPublicUnicastIP(%q)=%v, want %v", tt.ip, got, tt.public)
+			}
+		})
+	}
+}
+
+func TestUDPAdvertiseAutoPrefersPublicInterfaceIP(t *testing.T) {
+	old := publicInterfaceIPFunc
+	publicInterfaceIPFunc = func(ipv4 bool) (net.IP, error) {
+		return net.IPv4(203, 0, 113, 10), nil
+	}
+	defer func() { publicInterfaceIPFunc = old }()
+
+	srv := newUDPTestServer(config.UDP{BindIP: "0.0.0.0", Advertise: "auto"})
+	defer srv.Close()
+	got, err := srv.udpAdvertiseIP(net.IPv4(10, 0, 0, 1))
+	if err != nil || !got.Equal(net.IPv4(203, 0, 113, 10)) {
+		t.Fatalf("advertise IP=%v err=%v, want public interface IP", got, err)
+	}
+}
+
+func TestUDPAdvertiseAutoFailsWithoutPublicInterfaceIP(t *testing.T) {
+	old := publicInterfaceIPFunc
+	publicInterfaceIPFunc = func(ipv4 bool) (net.IP, error) {
+		return nil, fmt.Errorf("no public IPv4 address found")
+	}
+	defer func() { publicInterfaceIPFunc = old }()
+
+	srv := newUDPTestServer(config.UDP{BindIP: "0.0.0.0", Advertise: "auto"})
+	defer srv.Close()
+	if got, err := srv.udpAdvertiseIP(net.IPv4(10, 0, 0, 1)); err == nil {
+		t.Fatalf("udpAdvertiseIP()=%v, want error when no public interface IP exists", got)
+	}
+}
+
+func TestUDPAdvertiseAutoStillUsesPublicControlLocal(t *testing.T) {
+	srv := newUDPTestServer(config.UDP{BindIP: "0.0.0.0", Advertise: "auto"})
+	defer srv.Close()
+	got, err := srv.udpAdvertiseIP(net.IPv4(203, 0, 113, 20))
+	if err != nil || !got.Equal(net.IPv4(203, 0, 113, 20)) {
+		t.Fatalf("advertise IP=%v err=%v, want control local IP", got, err)
+	}
+}
+
 func TestUDPAssociateReturnsGeneralFailureForInvalidNonMatchingLegacyMap(t *testing.T) {
 	srv := newUDPTestServer(config.UDP{
 		Enabled: true, BindIP: "127.0.0.1", Advertise: "auto",

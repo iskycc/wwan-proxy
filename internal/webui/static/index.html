@@ -187,7 +187,7 @@
 	        <label>最大 UDP 会话数<input type="number" min="1" max="65535" name="udp_max_associations" value="64"><small>实例级硬上限，热重载期间也与旧会话共用。</small></label>
 	        <label class="toggle-label"><input type="checkbox" name="udp_strict_endpoint"><span></span>严格校验目标 IP 与端口<small>默认只锁定目标 IP，以兼容 TFTP 等换端口回复。</small></label>
         <label>UDP 监听 IP<input name="udp_bind_ip" value="0.0.0.0"></label>
-        <label>UDP 广播 IP<input name="udp_advertise" value="auto"></label>
+        <label>UDP 广播 IP<input name="udp_advertise" value="auto"><small>auto 优先使用控制连接地址；若该地址为内网 IP，会自动查找本机公网 IP。NAT 或无公网 IP 时需显式填写。</small></label>
         <label>UDP 空闲超时<input name="udp_idle_timeout" value="2m"></label>
 	        <label>UDP 固定 Relay 端口池<input name="udp_relay_ports" placeholder="如 12000, 12007, 53000"><small>逗号或空格分隔，最多 4096 个；留空时按下方范围随机。每个端口同时只分配给一个会话。</small></label>
         <label class="udp-range-field">UDP 最小端口<input type="number" min="1024" max="65535" name="udp_port_min" value="10000"></label>
