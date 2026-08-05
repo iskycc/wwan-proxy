@@ -399,7 +399,21 @@ docker run --detach --privileged \
   --name "${ufw_container_name}" \
   --volume "${repo_root}:/workspace:ro" \
   alpine:3.23 \
-  sh -ec 'apk add --no-cache openrc ufw nftables >/tmp/bootstrap.log 2>&1; exec /sbin/init' \
+  sh -ec '
+    for apk_attempt in $(seq 1 3); do
+      if apk add --no-cache openrc ufw nftables >/tmp/bootstrap.log 2>&1; then
+        break
+      fi
+      echo "apk attempt ${apk_attempt} failed, retrying..." >>/tmp/bootstrap.log
+      sleep 2
+    done
+    if ! command -v ufw >/dev/null 2>&1; then
+      echo "ufw package did not install a usable binary" >&2
+      cat /tmp/bootstrap.log >&2
+      exit 1
+    fi
+    exec /sbin/init
+  ' \
   >/dev/null
 for attempt in $(seq 1 30); do
   if docker exec "${ufw_container_name}" rc-status --all >/dev/null 2>&1; then
@@ -411,6 +425,11 @@ for attempt in $(seq 1 30); do
   fi
   sleep 1
 done
+if ! docker exec "${ufw_container_name}" sh -c 'command -v ufw >/dev/null 2>&1'; then
+  echo "ufw command not found after bootstrap" >&2
+  docker exec "${ufw_container_name}" cat /tmp/bootstrap.log >&2 || true
+  exit 1
+fi
 docker exec "${ufw_container_name}" sh -ec '
   ufw --force enable >/dev/null
   rc-update add ufw default >/dev/null
