@@ -91,8 +91,14 @@ fi
 
 section "wwan-proxy 配置"
 if [ -f "${DB}" ]; then
-  run sqlite3 "${DB}" "SELECT id, name, enabled, listen, interface, json_extract(config, '\$.max_connections') AS max_conn, json_extract(config, '\$.idle_timeout') AS idle, json_extract(config, '\$.connect_timeout') AS conn_to, json_extract(config, '\$.udp.enabled') AS udp_en, json_extract(config, '\$.udp.advertise') AS udp_adv, json_extract(config, '\$.udp.bind_ip') AS udp_bind, json_extract(config, '\$.bind.enabled') AS bind_en, json_extract(config, '\$.bind.advertise') AS bind_adv FROM servers;"
-  run sqlite3 "${DB}" "SELECT id, name, config FROM servers WHERE listen LIKE '%${SOCKS_PORT}%';"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    run sqlite3 "${DB}" "SELECT id, name, enabled, listen, interface, json_extract(config, '\$.max_connections') AS max_conn, json_extract(config, '\$.idle_timeout') AS idle, json_extract(config, '\$.connect_timeout') AS conn_to, json_extract(config, '\$.udp.enabled') AS udp_en, json_extract(config, '\$.udp.advertise') AS udp_adv, json_extract(config, '\$.udp.bind_ip') AS udp_bind, json_extract(config, '\$.bind.enabled') AS bind_en, json_extract(config, '\$.bind.advertise') AS bind_adv FROM servers;"
+    run sqlite3 "${DB}" "SELECT id, name, config FROM servers WHERE listen LIKE '%${SOCKS_PORT}%';"
+  elif command -v python3 >/dev/null 2>&1; then
+    run python3 -c "import sqlite3,json;c=sqlite3.connect('${DB}');print('id|name|enabled|listen|interface|max_conn|idle|conn_to|udp_en|udp_adv|udp_bind|bind_en|bind_adv');[print('|'.join(str(x) for x in r[:4])+('|'+r[4] if r[4] else '|')+'|'+str(json.loads(r[5]).get('max_connections',''))+'|'+json.loads(r[5]).get('idle_timeout','')+'|'+json.loads(r[5]).get('connect_timeout','')+'|'+str(json.loads(r[5]).get('udp',{}).get('enabled',''))+'|'+json.loads(r[5]).get('udp',{}).get('advertise','')+'|'+json.loads(r[5]).get('udp',{}).get('bind_ip','')+'|'+str(json.loads(r[5]).get('bind',{}).get('enabled',''))+'|'+json.loads(r[5]).get('bind',{}).get('advertise','')) for r in c.execute('SELECT id,name,enabled,listen,interface,config FROM servers')]"
+  else
+    echo "sqlite3/python3 均不可用，无法读取数据库配置"
+  fi
 else
   echo "数据库不存在: ${DB}"
 fi
@@ -114,6 +120,17 @@ fi
 section "接口和路由"
 run ip addr show 2>/dev/null || ifconfig -a 2>/dev/null
 run ip route show 2>/dev/null || route -n 2>/dev/null
+
+section "内存占用大户"
+run ps -o pid,rss,comm,args 2>/dev/null | sort -k2 -n | tail -20
+
+section "容器内存限制"
+for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.limit_in_bytes /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+  if [ -f "$f" ]; then
+    echo "$f = $(cat "$f")"
+  fi
+done
+run cat /sys/fs/cgroup/memory.stat 2>/dev/null | head -20 || true
 
 section "资源使用"
 run free -m 2>/dev/null || cat /proc/meminfo | head -10
