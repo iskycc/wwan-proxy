@@ -1,4 +1,5 @@
 /wwan-proxy
+/socks5-check
 /dist/
 *.db
 *.db-shm
