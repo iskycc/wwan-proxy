@@ -407,8 +407,8 @@ docker run --detach --privileged \
       echo "apk attempt ${apk_attempt} failed, retrying..." >>/tmp/bootstrap.log
       sleep 2
     done
-    if ! command -v ufw >/dev/null 2>&1; then
-      echo "ufw package did not install a usable binary" >&2
+    if ! test -x /usr/sbin/ufw; then
+      echo "ufw package did not install /usr/sbin/ufw" >&2
       cat /tmp/bootstrap.log >&2
       exit 1
     fi
@@ -425,13 +425,13 @@ for attempt in $(seq 1 30); do
   fi
   sleep 1
 done
-if ! docker exec "${ufw_container_name}" sh -c 'command -v ufw >/dev/null 2>&1'; then
-  echo "ufw command not found after bootstrap" >&2
+if ! docker exec "${ufw_container_name}" test -x /usr/sbin/ufw; then
+  echo "/usr/sbin/ufw not found after bootstrap" >&2
   docker exec "${ufw_container_name}" cat /tmp/bootstrap.log >&2 || true
   exit 1
 fi
 docker exec "${ufw_container_name}" sh -ec '
-  ufw --force enable >/dev/null
+  /usr/sbin/ufw --force enable >/dev/null
   rc-update add ufw default >/dev/null
   nft add table inet guard
   nft "add chain inet guard input { type filter hook input priority -5; policy accept; }"
@@ -439,7 +439,7 @@ docker exec "${ufw_container_name}" sh -ec '
   nft '\''add rule inet guard input ct state established,related accept'\''
   nft add rule inet guard input drop
 '
-docker exec "${ufw_container_name}" sh -ec 'ufw status | grep -Eq "^Status:[[:space:]]+active$"'
+docker exec "${ufw_container_name}" sh -ec '/usr/sbin/ufw status | grep -Eq "^Status:[[:space:]]+active$"'
 if docker exec "${ufw_container_name}" sh /workspace/scripts/install-alpine.sh \
   --archive "${archive_in_container}" \
   --checksum "${checksums_in_container}" \
@@ -449,7 +449,7 @@ if docker exec "${ufw_container_name}" sh /workspace/scripts/install-alpine.sh \
 fi
 grep -Fq 'multiple independent firewall owners are active' \
   /tmp/wwan-proxy-alpine-firewall-ufw-extra-hook.log
-if docker exec "${ufw_container_name}" ufw status | grep -Eq '(^|[[:space:]])9090(/tcp)?([[:space:]]|$)'; then
+if docker exec "${ufw_container_name}" /usr/sbin/ufw status | grep -Eq '(^|[[:space:]])9090(/tcp)?([[:space:]]|$)'; then
   echo "installer mutated UFW before rejecting the extra INPUT hook" >&2
   exit 1
 fi
