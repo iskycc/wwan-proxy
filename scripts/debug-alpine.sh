@@ -47,12 +47,21 @@ run ps | grep -i '[w]wan-proxy'
 run pidof wwan-proxy
 PID=$(pidof wwan-proxy 2>/dev/null || true)
 if [ -n "${PID}" ]; then
-  run ls -l /proc/${PID}/exe
-  run /proc/${PID}/exe -version
-  run cat /proc/${PID}/status | grep -E '^(Pid|PPid|Threads|FDSize|VmRSS|VmSize|State)'
-  run ls /proc/${PID}/fd | wc -l
-  run cat /proc/${PID}/limits | grep -i 'open files'
+  run ls -l "/proc/${PID}/exe"
+  run "/proc/${PID}/exe" -version
+  run cat "/proc/${PID}/status" | grep -E '^(Pid|PPid|Threads|FDSize|VmRSS|VmSize|State)'
+  run ls "/proc/${PID}/fd" | wc -l
+  run cat "/proc/${PID}/limits" | grep -iE 'max processes|open files'
 fi
+
+section "进程/线程限制"
+for f in /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids/pids.current /sys/fs/cgroup/pids/pids.max; do
+  if [ -f "$f" ]; then
+    echo "$f = $(cat "$f")"
+  fi
+done
+run cat /proc/sys/kernel/pid_max 2>/dev/null || true
+run cat /proc/sys/kernel/threads-max 2>/dev/null || true
 
 section "网络连接状态 (${SOCKS_PORT})"
 run ss -ant | grep ":${SOCKS_PORT}" | head -100

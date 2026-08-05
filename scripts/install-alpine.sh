@@ -1575,6 +1575,16 @@ collect_diagnostics() {
 		fi
 		echo "--- processes ---"
 		ps -o pid,user,group,comm 2>&1 | grep -E '[w]wan-proxy|[s]upervise-daemon' || true
+		service_pid=$(pidof wwan-proxy 2>/dev/null | awk '{print $1}')
+		if [ -n "${service_pid}" ]; then
+			grep -E '^(Max processes|Max open files)' "/proc/${service_pid}/limits" 2>&1 || true
+			grep -E '^(Pid|Threads):' "/proc/${service_pid}/status" 2>&1 || true
+		fi
+		for pids_file in /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids/pids.current /sys/fs/cgroup/pids/pids.max; do
+			if [ -f "${pids_file}" ]; then
+				echo "${pids_file} = $(cat "${pids_file}" 2>&1)"
+			fi
+		done
 		echo "--- listening sockets ---"
 		netstat -lntup 2>&1 || true
 		echo "--- host firewall ---"
@@ -2246,6 +2256,19 @@ while [ "${stable_seconds}" -lt 5 ]; do
 	[ "${stable_seconds}" -ge 5 ] || sleep 1
 done
 log_line INFO "OpenRC service remained running for ${stable_seconds} consecutive checks"
+
+SERVICE_PID=$(pidof wwan-proxy 2>/dev/null | awk '{print $1}')
+[ -n "${SERVICE_PID}" ] || fatal "could not identify the running wwan-proxy process"
+SERVICE_NPROC_LIMIT=$(awk '$1 == "Max" && $2 == "processes" { print $3 "/" $4; exit }' "/proc/${SERVICE_PID}/limits")
+SERVICE_NOFILE_LIMIT=$(awk '$1 == "Max" && $2 == "open" && $3 == "files" { print $4 "/" $5; exit }' "/proc/${SERVICE_PID}/limits")
+log_line INFO "service_limits pid=${SERVICE_PID} nproc_soft_hard=${SERVICE_NPROC_LIMIT:-unknown} nofile_soft_hard=${SERVICE_NOFILE_LIMIT:-unknown}"
+if [ -f /sys/fs/cgroup/pids.max ]; then
+	CGROUP_PIDS_MAX=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo unknown)
+	log_line INFO "cgroup_pids_max=${CGROUP_PIDS_MAX} (independent of service RLIMIT_NPROC)"
+elif [ -f /sys/fs/cgroup/pids/pids.max ]; then
+	CGROUP_PIDS_MAX=$(cat /sys/fs/cgroup/pids/pids.max 2>/dev/null || echo unknown)
+	log_line INFO "cgroup_pids_max=${CGROUP_PIDS_MAX} (independent of service RLIMIT_NPROC)"
+fi
 
 CURRENT_STEP="health-check"
 health_started=$(date +%s)

@@ -82,6 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
 - 从同一个 Release 下载程序与 `SHA256SUMS`，精确校验目标资产后才解包；
 - 安装 OpenRC、CA 证书、`libcap-utils` 和日志轮转依赖，创建非 root 的 `wwan-proxy` 系统用户；
 - 将 `cap_net_raw=ep` 只授予服务程序，以支持 `SO_BINDTODEVICE`，并验证 capability 确实生效；
+- 将服务的文件描述符上限设为 `65536`、进程/线程 RLIMIT 设为 `unlimited`；容器或宿主机的 cgroup `pids.max` 仍是独立硬上限，安装器不会越权修改；
 - 保留 SQLite 数据库和已有 `/etc/conf.d/wwan-proxy`，升级前对默认数据库做安全副本；
 - 通过 OpenRC 稳定性检查和 `/api/health` 验证首次启动；程序或服务定义更新失败时自动恢复上一版本，不回退或删除数据库；
 - 未在 SQLite 保存监听地址时，以 `0.0.0.0:9090` 作为 Alpine 首次运行默认值，并检查本机防火墙是否可能阻止该 TCP 端口；
@@ -99,7 +100,7 @@ OpenRC      /etc/init.d/wwan-proxy
 升级备份    /var/backups/wwan-proxy/
 ```
 
-程序、服务账号、数据库、运行目录和日志目录由安装器固定管理，不能在 `conf.d` 中改写；这样可以避免“更新了一个二进制、OpenRC 却启动另一个路径”。`/etc/conf.d/wwan-proxy` 仅用于文件描述符上限、重启策略和安装后的健康检查地址，升级时保留其内容并强制收紧为 root 所有、不可由普通用户写入。
+程序、服务账号、数据库、运行目录和日志目录由安装器固定管理，不能在 `conf.d` 中改写；这样可以避免“更新了一个二进制、OpenRC 却启动另一个路径”。`/etc/conf.d/wwan-proxy` 仅用于文件描述符上限、进程/线程 RLIMIT、重启策略和安装后的健康检查地址，升级时保留其内容并强制收紧为 root 所有、不可由普通用户写入。旧配置即使没有 `WWAN_PROXY_NPROC_LIMIT`，新版 OpenRC 也会默认使用 `unlimited`。
 
 常用诊断命令：
 

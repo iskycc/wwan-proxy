@@ -1,7 +1,8 @@
 #!/sbin/openrc-run
+# shellcheck shell=sh
 # Variables and callbacks below are consumed by openrc-run; Alpine's ash
 # provides local, while pgrep is not part of this service's dependencies.
-# shellcheck disable=SC2009,SC2034,SC3043
+# shellcheck disable=SC2009,SC2034,SC2086,SC3043
 
 name="wwan-proxy"
 description="Multi-interface SOCKS5 and HTTP proxy"
@@ -27,7 +28,11 @@ pidfile="${WWAN_PROXY_RUNTIME_DIR}/supervise-daemon.pid"
 output_log="${WWAN_PROXY_LOG_DIR}/service.log"
 error_log="${WWAN_PROXY_LOG_DIR}/service.log"
 umask="0077"
-rc_ulimit="${WWAN_PROXY_ULIMIT:--n 65536}"
+# Keep the nproc setting separate so upgrades from an older conf.d file, which
+# only defines WWAN_PROXY_ULIMIT, still remove the service-level process/thread
+# ceiling without overwriting the administrator's existing configuration.
+# Host/container cgroup pids.max remains an independent upper bound.
+rc_ulimit="${WWAN_PROXY_ULIMIT:--n 65536} -u ${WWAN_PROXY_NPROC_LIMIT:-unlimited}"
 respawn_delay="${WWAN_PROXY_RESPAWN_DELAY:-2}"
 respawn_max="${WWAN_PROXY_RESPAWN_MAX:-5}"
 respawn_period="${WWAN_PROXY_RESPAWN_PERIOD:-60}"
@@ -59,6 +64,13 @@ verify_binary_capability() {
 validate_installation() {
 	local failed=0
 	local metadata
+	# rc_ulimit is intentionally word-split: it contains arguments for Alpine
+	# ash's ulimit builtin. Test it in a subshell so validation cannot change the
+	# limits of the openrc-run process performing the check.
+	if ! (ulimit ${rc_ulimit}) 2>/dev/null; then
+		eerror "invalid service ulimit settings: ${rc_ulimit}"
+		failed=1
+	fi
 
 	if [ ! -x "${WWAN_PROXY_BINARY}" ]; then
 		eerror "binary is missing or not executable: ${WWAN_PROXY_BINARY}"
@@ -148,6 +160,19 @@ diagnose() {
 	rc-service "${RC_SVCNAME}" status 2>&1 || true
 	einfo "Processes:"
 	ps -o pid,user,group,comm 2>&1 | grep -E '[w]wan-proxy|[s]upervise-daemon' || true
+	local service_pid
+	service_pid=$(pidof wwan-proxy 2>/dev/null | awk '{print $1}')
+	if [ -n "${service_pid}" ]; then
+		einfo "Service process/thread limits:"
+		grep -E '^(Max processes|Max open files)' "/proc/${service_pid}/limits" 2>&1 || true
+		grep -E '^(Pid|Threads):' "/proc/${service_pid}/status" 2>&1 || true
+	fi
+	einfo "Cgroup process/thread limits:"
+	for pids_file in /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids/pids.current /sys/fs/cgroup/pids/pids.max; do
+		if [ -f "${pids_file}" ]; then
+			echo "${pids_file} = $(cat "${pids_file}" 2>&1)"
+		fi
+	done
 	einfo "Listening sockets:"
 	netstat -lntup 2>&1 || true
 	einfo "Host firewall:"

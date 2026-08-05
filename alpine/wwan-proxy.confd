@@ -1,7 +1,11 @@
 # OpenRC settings for wwan-proxy. The installer preserves this file on upgrades.
 # The binary, service account, database, runtime and log paths are fixed in the
 # init script; only runtime policy and the installer health probe belong here.
+# Keep enough file descriptors for proxy sockets. Process/thread creation is
+# unlimited at the service RLIMIT layer by default; a finite container/host
+# cgroup pids.max still takes precedence and cannot be raised from here.
 WWAN_PROXY_ULIMIT="-n 65536"
+WWAN_PROXY_NPROC_LIMIT="unlimited"
 WWAN_PROXY_RESPAWN_DELAY="2"
 WWAN_PROXY_RESPAWN_MAX="5"
 WWAN_PROXY_RESPAWN_PERIOD="60"
