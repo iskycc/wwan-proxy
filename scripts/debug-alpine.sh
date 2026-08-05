@@ -49,6 +49,15 @@ section "网络连接状态 (${SOCKS_PORT})"
 run ss -ant | grep ":${SOCKS_PORT}" | head -100
 run ss -ant | grep ":${SOCKS_PORT}" | awk '{print $1}' | sort | uniq -c | sort -rn
 run ss -antl | grep ":${SOCKS_PORT}"
+run ss -s
+
+section "TCP 统计与丢包"
+run cat /proc/net/snmp | grep -E '^Tcp:' | tail -1
+run cat /proc/net/netstat 2>/dev/null | grep -E '^TcpExt:' | tail -1
+run cat /proc/net/snmp6 2>/dev/null | grep -E '^Tcp[^ ]*' | head -20
+
+section "按源 IP 聚合连接数"
+run ss -ant | awk '{print $5}' | awk -F: '{print $1}' | sort | uniq -c | sort -rn | head -20
 
 section "WebUI 端口 (${WEB_PORT})"
 run ss -antl | grep ":${WEB_PORT}"
