@@ -296,12 +296,20 @@ func (s *Server) handle(c net.Conn) error {
 			_ = writeReply(c, repCommandNotSupported, nil)
 			return fmt.Errorf("BIND disabled")
 		}
+		if s.cfg.Upstream.Enabled {
+			_ = writeReply(c, repCommandNotSupported, nil)
+			return fmt.Errorf("BIND not supported with upstream proxy")
+		}
 		s.metrics.bindCommands.Add(1)
 		return s.handleBindContext(s.ctx, c, dst)
 	case cmdUDPAssociate:
 		if !s.cfg.UDP.Enabled {
 			_ = writeReply(c, repCommandNotSupported, nil)
 			return fmt.Errorf("UDP ASSOCIATE disabled")
+		}
+		if s.cfg.Upstream.Enabled {
+			_ = writeReply(c, repCommandNotSupported, nil)
+			return fmt.Errorf("UDP ASSOCIATE not supported with upstream proxy")
 		}
 		s.metrics.udpAssociations.Add(1)
 		return s.handleUDPContext(s.ctx, c, dst)
@@ -413,6 +421,29 @@ func (s *Server) ProbeDialContext(parent context.Context, network, address strin
 func (s *Server) dialContext(parent context.Context, network, address string, enforceAccess bool) (net.Conn, error) {
 	ctx, cancel := s.operationContext(parent)
 	defer cancel()
+
+	if s.cfg.Upstream.Enabled {
+		// Access control is still evaluated against the resolved/requested target
+		// before we hand the address to the upstream SOCKS5 proxy.
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return nil, fmt.Errorf("invalid target port %q", port)
+		}
+		if enforceAccess && s.access != nil {
+			literalHost, _ := splitIPZone(host)
+			if ip := net.ParseIP(literalHost); ip != nil {
+				if !s.access.AllowTarget(host, ip, portNumber) {
+					return nil, fmt.Errorf("%w: %s", policy.ErrTargetDenied, address)
+				}
+			}
+		}
+		return DialViaUpstream(ctx, s.cfg.Upstream, s.dialer(), network, address)
+	}
+
 	dialer := s.dialer()
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
