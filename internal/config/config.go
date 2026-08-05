@@ -58,6 +58,7 @@ type Server struct {
 	Auth           Auth          `json:"auth"`
 	Access         AccessControl `json:"access"`
 	HTTPProxy      HTTPProxy     `json:"http_proxy"`
+	Upstream       Upstream      `json:"upstream"`
 	UDP            UDP           `json:"udp"`
 	Heartbeat      Heartbeat     `json:"heartbeat"`
 }
@@ -143,6 +144,17 @@ type Auth struct {
 type HTTPProxy struct {
 	Enabled bool   `json:"enabled"`
 	Listen  string `json:"listen"`
+}
+
+// Upstream describes an optional upstream SOCKS5 proxy that this server
+// uses for outbound CONNECT requests. When enabled, BIND and UDP ASSOCIATE
+// are rejected because the upstream client only implements CONNECT.
+type Upstream struct {
+	Enabled    bool   `json:"enabled"`
+	Address    string `json:"address"`
+	AuthMethod string `json:"auth_method"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
 }
 
 type DNS struct {
@@ -297,6 +309,9 @@ func (s *Server) ApplyDefaults() {
 	if s.Access.TargetDefault == "" {
 		s.Access.TargetDefault = "allow"
 	}
+	if s.Upstream.AuthMethod == "" {
+		s.Upstream.AuthMethod = "none"
+	}
 	if s.UDP.BindIP == "" {
 		s.UDP.BindIP = "0.0.0.0"
 	}
@@ -379,6 +394,25 @@ func (s *Server) Validate() error {
 		}
 		if s.HTTPProxy.Listen == s.Listen {
 			return fmt.Errorf("http_proxy.listen must differ from the SOCKS5 listen address")
+		}
+	}
+	if s.Upstream.Enabled {
+		if s.Upstream.Address == "" {
+			return fmt.Errorf("upstream.address is required when upstream is enabled")
+		}
+		if _, _, err := net.SplitHostPort(s.Upstream.Address); err != nil {
+			return fmt.Errorf("upstream.address: %w", err)
+		}
+		if s.Upstream.AuthMethod != "none" && s.Upstream.AuthMethod != "username_password" {
+			return fmt.Errorf("upstream.auth_method must be none or username_password")
+		}
+		if s.Upstream.AuthMethod == "username_password" {
+			if len(s.Upstream.Username) == 0 || len(s.Upstream.Username) > 255 {
+				return fmt.Errorf("upstream.username must be 1..255 bytes")
+			}
+			if len(s.Upstream.Password) == 0 || len(s.Upstream.Password) > 255 {
+				return fmt.Errorf("upstream.password must be 1..255 bytes")
+			}
 		}
 	}
 	if s.Bind.Advertise != "auto" {

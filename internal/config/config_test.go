@@ -240,3 +240,51 @@ func TestBindAdvertiseValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamValidation(t *testing.T) {
+	base := func() Server {
+		return Server{
+			Name: "test", Listen: "0.0.0.0:1080", Interface: "eth0",
+		}
+	}
+
+	t.Run("disabled upstream is valid", func(t *testing.T) {
+		s := base()
+		s.Upstream = Upstream{Enabled: false}
+		if err := s.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("enabled upstream requires address", func(t *testing.T) {
+		s := base()
+		s.Upstream = Upstream{Enabled: true}
+		if err := s.Validate(); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("enabled upstream with no auth", func(t *testing.T) {
+		s := base()
+		s.Upstream = Upstream{Enabled: true, Address: "10.0.0.1:1080", AuthMethod: "none"}
+		if err := s.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("username_password requires credentials", func(t *testing.T) {
+		s := base()
+		s.Upstream = Upstream{Enabled: true, Address: "10.0.0.1:1080", AuthMethod: "username_password"}
+		if err := s.Validate(); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("username_password with credentials is valid", func(t *testing.T) {
+		s := base()
+		s.Upstream = Upstream{Enabled: true, Address: "10.0.0.1:1080", AuthMethod: "username_password", Username: "u", Password: "p"}
+		if err := s.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
