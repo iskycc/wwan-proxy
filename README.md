@@ -59,6 +59,32 @@ GitHub Actions 会在每次提交到 `main` 后自动执行以下流程：
 
 也可以在仓库的 Actions 页面手动运行同一流程。重复运行同一提交时会更新原 Release 的附件，不会创建重复标签。
 
+### Dante 云 NAT 对照代理
+
+需要用 Alpine 原生 Dante 对照测试 SOCKS5 时，可以让 Dante 把云公网 IPv4 当作本机 `internal` 地址，并把云平台送到私网 IPv4 的 TCP/UDP 流量再次 DNAT 到该公网 loopback alias：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-dante-alpine.sh \
+  | sh -s -- \
+      --public-ip 203.0.113.10 \
+      --private-ip 172.16.0.4 \
+      --port 18125 \
+      --udp-range 16000:17000 \
+      --external-iface eth0 \
+      --user proxy_user
+```
+
+首次创建 `proxy_user` 时会从终端安全调用 `passwd`，也可以通过 `DANTE_PASSWORD` 非交互安装。脚本支持 Alpine 3.21–3.23，安装原生 `dante-server`、OpenRC、iproute2 和 iptables，并完成以下配置：
+
+- 把公网 IPv4 作为 `/32` alias 持久安装到 `lo`；
+- 生成 Alpine 使用的 `/etc/sockd.conf`，将 `internal` 设为公网 alias、`external` 设为指定出口网卡；
+- 只允许指定系统用户执行 `CONNECT` 和 `UDP ASSOCIATE`，将客户端侧 UDP relay 限制在指定范围；
+- 将到达私网 IPv4 的 SOCKS TCP 端口和 UDP relay 范围幂等 DNAT 到公网 alias；
+- 通过独立 OpenRC 服务持久化 alias 和 NAT 规则，不覆盖主机已有的 iptables 规则；
+- 将 Dante 的文件描述符上限设为 `65536`，进程数限制设为 `unlimited`。
+
+脚本默认不添加可选 SNAT；外部 UDP 实测确认回包源地址异常时，可以使用相同参数重新运行并添加 `--enable-snat`。脚本也不会猜测或改写主机 INPUT 防火墙，云安全组和本机防火墙需要明确放行 TCP `18125` 与 UDP `16000:17000`。原配置会备份到 `/var/backups/dante-cloud/`，完整日志写入 `/var/log/dante-cloud-install.log`。
+
 ### Alpine Linux 3.21–3.23 一键安装
 
 Alpine 3.21、3.22 和 3.23 使用 OpenRC。先进入 root shell，再执行全新安装或升级：

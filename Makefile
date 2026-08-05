@@ -15,9 +15,11 @@ check:
 
 check-scripts:
 	sh -n scripts/install-alpine.sh
+	sh -n scripts/install-dante-alpine.sh
 	bash -n scripts/test-alpine-firewall.sh
 	sh -n alpine/wwan-proxy.openrc
 	test -x scripts/install-alpine.sh
+	test -x scripts/install-dante-alpine.sh
 	test -x scripts/test-alpine-firewall.sh
 	test -x alpine/wwan-proxy.openrc
 	test -s alpine/wwan-proxy.confd

@@ -38,9 +38,11 @@ jobs:
       - name: Validate Alpine installer and OpenRC files
         run: |
           test -x scripts/install-alpine.sh
+          test -x scripts/install-dante-alpine.sh
           test -x scripts/test-alpine-firewall.sh
           test -x alpine/wwan-proxy.openrc
           sh -n scripts/install-alpine.sh
+          sh -n scripts/install-dante-alpine.sh
           bash -n scripts/test-alpine-firewall.sh
           sh -n alpine/wwan-proxy.openrc
           test -s alpine/wwan-proxy.confd
@@ -52,7 +54,11 @@ jobs:
             docker run --rm \
               --volume "${PWD}:/src:ro" \
               "alpine:${alpine_version}" \
-              sh -ec 'sh -n /src/scripts/install-alpine.sh; sh -n /src/alpine/wwan-proxy.openrc'
+              sh -ec '
+                sh -n /src/scripts/install-alpine.sh
+                sh -n /src/scripts/install-dante-alpine.sh
+                sh -n /src/alpine/wwan-proxy.openrc
+              '
           done
 
       - name: Run race-enabled tests
@@ -129,7 +135,7 @@ jobs:
             ./cmd/wwan-proxy
           cp README.md wwan-proxy.service "${package_dir}/"
           cp openwrt/wwan-proxy.init "${package_dir}/"
-          cp scripts/install-alpine.sh "${package_dir}/"
+          cp scripts/install-alpine.sh scripts/install-dante-alpine.sh "${package_dir}/"
           cp alpine/wwan-proxy.openrc alpine/wwan-proxy.confd alpine/wwan-proxy.logrotate "${package_dir}/"
           tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
 
@@ -143,7 +149,8 @@ jobs:
           tar -tzf "${archive}" > "${contents}"
           for expected in \
             wwan-proxy README.md wwan-proxy.service wwan-proxy.init \
-            install-alpine.sh wwan-proxy.openrc wwan-proxy.confd wwan-proxy.logrotate
+            install-alpine.sh install-dante-alpine.sh \
+            wwan-proxy.openrc wwan-proxy.confd wwan-proxy.logrotate
           do
             grep --fixed-strings --line-regexp --quiet "${PACKAGE_NAME}/${expected}" "${contents}"
           done
