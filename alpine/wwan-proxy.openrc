@@ -18,7 +18,9 @@ WWAN_PROXY_RUNTIME_DIR="/run/wwan-proxy"
 
 supervisor="supervise-daemon"
 command="${WWAN_PROXY_BINARY}"
-command_args="-db ${WWAN_PROXY_DATABASE}"
+# The Alpine first-run default is externally reachable, but remains only a
+# default: an explicit address saved in SQLite always wins.
+command_args="-db ${WWAN_PROXY_DATABASE} -web-default 0.0.0.0:9090"
 command_user="${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}"
 directory="${WWAN_PROXY_DATA_DIR}"
 pidfile="${WWAN_PROXY_RUNTIME_DIR}/supervise-daemon.pid"
@@ -148,6 +150,23 @@ diagnose() {
 	ps -o pid,user,group,comm 2>&1 | grep -E '[w]wan-proxy|[s]upervise-daemon' || true
 	einfo "Listening sockets:"
 	netstat -lntup 2>&1 || true
+	einfo "Host firewall:"
+	if command -v firewall-cmd >/dev/null 2>&1; then
+		firewall-cmd --state 2>&1 || true
+		firewall-cmd --get-active-zones 2>&1 || true
+	fi
+	if command -v ufw >/dev/null 2>&1; then
+		LC_ALL=C ufw status verbose 2>&1 || true
+	fi
+	if command -v awall >/dev/null 2>&1; then
+		awall list --all 2>&1 || true
+	fi
+	if command -v nft >/dev/null 2>&1; then
+		nft -a list ruleset 2>&1 | head -n 500 || true
+	fi
+	if command -v iptables >/dev/null 2>&1; then
+		iptables -S 2>&1 | head -n 500 || true
+	fi
 	if command -v ip >/dev/null 2>&1; then
 		einfo "Interfaces:"
 		ip link show 2>&1 || true

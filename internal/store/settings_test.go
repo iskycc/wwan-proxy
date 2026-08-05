@@ -92,3 +92,101 @@ func TestSystemSettingsValidation(t *testing.T) {
 		t.Fatal("invalid log level accepted")
 	}
 }
+
+func TestSystemSettingsWebDefaultOnlyAppliesWithoutPersistedValue(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	standard, err := s.SystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if standard.WebListen != "127.0.0.1:9090" {
+		t.Fatalf("standard default=%q", standard.WebListen)
+	}
+	alpine, err := s.SystemSettingsWithWebDefault(context.Background(), "0.0.0.0:9090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alpine.WebListen != "0.0.0.0:9090" {
+		t.Fatalf("Alpine default=%q", alpine.WebListen)
+	}
+	var rows int
+	if err := s.db.QueryRowContext(context.Background(), `SELECT count(*) FROM system_settings`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("reading a platform default unexpectedly persisted %d settings rows", rows)
+	}
+	if err := s.SetWebListenDefault("0.0.0.0:9090"); err != nil {
+		t.Fatal(err)
+	}
+	processDefault, err := s.SystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processDefault.WebListen != "0.0.0.0:9090" {
+		t.Fatalf("process-wide default=%q", processDefault.WebListen)
+	}
+
+	alpine.WebListen = "127.0.0.1:9191"
+	if err := s.SaveSystemSettings(context.Background(), &alpine); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := s.SystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.WebListen != "127.0.0.1:9191" {
+		t.Fatalf("platform default overrode persisted listener: %q", persisted.WebListen)
+	}
+}
+
+func TestSystemSettingsRejectsInvalidWebDefault(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.SystemSettingsWithWebDefault(context.Background(), "missing-port"); err == nil {
+		t.Fatal("invalid WebUI default was accepted")
+	}
+}
+
+func TestOpenWithWebDefaultPreservesPersistedListenerAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.db")
+	s, err := OpenWithWebDefault(path, "0.0.0.0:9090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := s.SystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.WebListen != "0.0.0.0:9090" {
+		t.Fatalf("first-run listener=%q", settings.WebListen)
+	}
+	settings.WebListen = "127.0.0.1:9191"
+	if err := s.SaveSystemSettings(context.Background(), &settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenWithWebDefault(path, "0.0.0.0:9090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	persisted, err := reopened.SystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.WebListen != "127.0.0.1:9191" {
+		t.Fatalf("platform default overrode reopened persisted listener: %q", persisted.WebListen)
+	}
+}

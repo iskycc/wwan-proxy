@@ -84,6 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
 - 将 `cap_net_raw=ep` 只授予服务程序，以支持 `SO_BINDTODEVICE`，并验证 capability 确实生效；
 - 保留 SQLite 数据库和已有 `/etc/conf.d/wwan-proxy`，升级前对默认数据库做安全副本；
 - 通过 OpenRC 稳定性检查和 `/api/health` 验证首次启动；程序或服务定义更新失败时自动恢复上一版本，不回退或删除数据库；
+- 未在 SQLite 保存监听地址时，以 `0.0.0.0:9090` 作为 Alpine 首次运行默认值，并检查本机防火墙是否可能阻止该 TCP 端口；
 - 把每个阶段、命令、退出码、下载状态、SHA-256、系统信息和失败诊断写入 `/var/log/wwan-proxy-install.log`。
 
 固定安装路径：
@@ -113,7 +114,13 @@ rc-service wwan-proxy follow
 rc-service -d wwan-proxy restart
 ```
 
-安装器不传 `-web`，因此 WebUI 仍使用 SQLite 中保存的监听地址。升级环境如果修改过 WebUI 地址，可以显式指定健康检查地址：
+Alpine OpenRC 使用 `-web-default 0.0.0.0:9090`：它只在 SQLite 没有明确值时生效，已保存的 loopback、自定义 IP 或自定义端口不会被覆盖。安装后从可信管理网络访问：
+
+```text
+http://<Alpine 主机 IP>:9090
+```
+
+安装健康检查仍使用 `127.0.0.1`，不会错误地把通配监听地址 `0.0.0.0` 当成访问目标。升级环境如果使用自定义端口，可以显式指定健康检查地址：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-alpine.sh \
@@ -121,6 +128,21 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
 ```
 
 健康检查 URL 必须是无凭据、无 query 和 fragment 的 `http://` 或 `https://` 地址，避免令牌进入进程参数或诊断日志。显式传入的地址，或 `conf.d` 中不同于默认值的地址，探测失败时会触发程序/OpenRC 文件回滚。
+
+安装器默认审计 firewalld、UFW、awall、nftables 和 iptables，并把完整判断写入安装日志：没有活动 INPUT 防火墙时不会安装防火墙包或添加规则；存在明确规则时记录已放行；确认活动防火墙正在阻断且后端可安全识别时，自动放行实际 WebUI TCP 端口。nftables 自动开放只接受与已安装 Alpine 软件包摘要一致的主配置，并且启动目录中只能有安装器自身管理的片段；其他持久片段、自定义链或无法可靠推导的规则不会被猜测。默认开放模式会发出 WARN 并以非零状态结束，但保留已安装且健康运行的服务，避免日志声称远程可用而实际仍被阻断。云安全组、上级路由器和运营商网络不属于本机规则，仍需单独检查。
+
+首次 WebUI 初始化前，第一个访问者可以创建管理员。默认放通规则面向当前防火墙 zone 或 INPUT 链，安装前应确认主机只连接到可信管理网络；也可以只检查、不更改规则：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-alpine.sh \
+  | sh -s -- --check-firewall
+```
+
+默认行为不会启用原本停用的防火墙，也不会猜测多个 firewalld zone、awall 拓扑或自定义 nftables 链。可使用 `--open-firewall` 显式选择默认行为，也可用 `--skip-firewall` 完全跳过检查。`0.0.0.0` 会覆盖所有 IPv4 网口，包括可能具有公网地址的 WWAN；应尽快初始化管理员，并优先将 TCP/9090 限制在可信局域网、VPN 或管理源网段。WebUI 当前使用明文 HTTP，不建议直接暴露到互联网。
+
+`--no-start` 不会在服务尚未监听时提前开放端口，因此同时推迟防火墙检查和修改；后续正常运行一次安装器即可启动服务并完成判断。
+
+安装阶段只知道 WebUI 端口。之后在 SQLite 中新增的 SOCKS5、HTTP Proxy 和多个 UDP Relay 端口必须根据实际配置另行放通。
 
 使用本地归档验收时必须同时提供归档和校验文件；安装器不会接受未校验的包：
 
@@ -219,7 +241,7 @@ http://127.0.0.1:9090
 
 SOCKS5/HTTP Proxy 用户密码写入 SQLite 前会先计算 SHA-256，再使用 bcrypt 哈希；配置 API 不返回哈希，已有明文旧记录在数据库打开时自动迁移并清理旧页与 WAL 中的明文痕迹。这个静态保护不改变代理协议本身：RFC 1929 用户名密码认证和 HTTP Proxy Basic 认证在客户端到代理的链路上都不提供加密。不要把认证监听器直接暴露到不可信网络；应使用可信局域网、VPN、SSH 隧道或其他加密接入，并结合来源 CIDR 和防火墙限制访问。
 
-默认 WebUI 仅监听本机。若需远程访问，仍建议使用 SSH 端口转发，或通过 HTTPS 反向代理提供服务，避免凭据和 Cookie 经明文 HTTP 传输。
+直接运行二进制、systemd 和 OpenWrt 部署的默认 WebUI 仅监听本机；Alpine OpenRC 在 SQLite 没有保存值时使用 `0.0.0.0:9090`。远程访问仍建议通过可信管理网络、SSH 端口转发或 HTTPS 反向代理，避免凭据和 Cookie 经明文 HTTP 传输。
 
 绑定出口网口需要 root 或 `CAP_NET_RAW`。`interface` 配置填写 Linux 网口名即可，不区分物理网口和虚拟网口；WebUI 会通过 `/api/interfaces` 列出本机候选网口，但也允许直接手工填写：
 

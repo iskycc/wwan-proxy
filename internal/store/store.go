@@ -17,12 +17,22 @@ import (
 )
 
 type Store struct {
-	db            *sql.DB
-	path          string
-	bootstrapPath string
+	db               *sql.DB
+	path             string
+	bootstrapPath    string
+	webListenDefault string
 }
 
 func Open(path string) (*Store, error) {
+	return OpenWithWebDefault(path, "")
+}
+
+// OpenWithWebDefault injects a platform-specific first-run WebUI listener
+// before any database settings are read, including redirect/relocation paths.
+func OpenWithWebDefault(path, webDefault string) (*Store, error) {
+	if err := validateWebDefault(webDefault); err != nil {
+		return nil, err
+	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve database path: %w", err)
@@ -38,6 +48,7 @@ func Open(path string) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.webListenDefault = webDefault
 		s.bootstrapPath = filepath.Clean(absolute)
 		settings, err := s.SystemSettings(context.Background())
 		if err != nil {
@@ -51,6 +62,7 @@ func Open(path string) (*Store, error) {
 					_ = s.Close()
 					return nil, fmt.Errorf("open database bootstrap pointer: %w", err)
 				}
+				bootstrap.webListenDefault = webDefault
 				settings.DatabasePath = current
 				err = bootstrap.SaveSystemSettings(context.Background(), &settings)
 				_ = bootstrap.Close()

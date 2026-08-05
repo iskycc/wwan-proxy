@@ -38,8 +38,10 @@ jobs:
       - name: Validate Alpine installer and OpenRC files
         run: |
           test -x scripts/install-alpine.sh
+          test -x scripts/test-alpine-firewall.sh
           test -x alpine/wwan-proxy.openrc
           sh -n scripts/install-alpine.sh
+          bash -n scripts/test-alpine-firewall.sh
           sh -n alpine/wwan-proxy.openrc
           test -s alpine/wwan-proxy.confd
           test -s alpine/wwan-proxy.logrotate
@@ -158,10 +160,47 @@ jobs:
             --cap-add SETFCAP \
             --volume "${PWD}:/workspace:ro" \
             alpine:3.23 \
-            sh /workspace/scripts/install-alpine.sh \
-              --archive "/workspace/dist/${PACKAGE_NAME}.tar.gz" \
-              --checksum "/workspace/dist/${PACKAGE_NAME}.SHA256SUMS" \
-              --no-start
+            sh -ec '
+              sh /workspace/scripts/install-alpine.sh \
+                --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                --no-start
+              listener=$(/usr/local/bin/wwan-proxy \
+                -db /tmp/wwan-proxy-listener-test.db \
+                -web-default 0.0.0.0:9090 \
+                -print-web-listen)
+              test "${listener}" = 0.0.0.0:9090
+              grep -q -- "-web-default 0.0.0.0:9090" /etc/init.d/wwan-proxy
+              test ! -e /etc/nftables.d/50_wwan-proxy.nft
+              grep -Fq -- "--no-start selected; service was not enabled or started, and firewall inspection or changes were deferred" /var/log/wwan-proxy-install.log
+
+              /usr/local/bin/wwan-proxy \
+                -db /tmp/wwan-proxy-live-listener-test.db \
+                -web-default 0.0.0.0:9090 \
+                >/tmp/wwan-proxy-live-listener-test.log 2>&1 &
+              server_pid=$!
+              trap '"'"'kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true'"'"' EXIT
+              container_ipv4=$(hostname -i | awk '"'"'{ print $1 }'"'"')
+              test -n "${container_ipv4}"
+              for attempt in $(seq 1 30); do
+                if curl -fsS http://127.0.0.1:9090/api/health >/dev/null && \
+                  curl -fsS "http://${container_ipv4}:9090/api/health" >/dev/null
+                then
+                  listener_ready=1
+                  break
+                fi
+                sleep 1
+              done
+              test "${listener_ready:-0}" -eq 1
+              grep -Eq '"'"'^[[:space:]]*[0-9]+:[[:space:]]+00000000:2382[[:space:]]'"'"' /proc/net/tcp
+              if grep -Eq '"'"':2382[[:space:]]'"'"' /proc/net/tcp6; then
+                echo "IPv4 literal listener unexpectedly opened an IPv6 wildcard socket" >&2
+                exit 1
+              fi
+              kill "${server_pid}"
+              wait "${server_pid}" || true
+              trap - EXIT
+            '
 
       - name: Verify static musl binary
         if: matrix.libc == 'musl'
@@ -180,6 +219,15 @@ jobs:
             exit 1
           fi
           file "${binary}" | grep --quiet 'statically linked'
+
+      - name: Test Alpine nftables detection and opening
+        if: matrix.libc == 'musl'
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        run: |
+          scripts/test-alpine-firewall.sh \
+            "dist/${PACKAGE_NAME}.tar.gz" \
+            "dist/${PACKAGE_NAME}.SHA256SUMS"
 
       - name: Upload package
         uses: actions/upload-artifact@v7

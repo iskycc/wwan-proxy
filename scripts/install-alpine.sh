@@ -12,6 +12,7 @@ SERVICE_NAME="wwan-proxy"
 DEFAULT_REPOSITORY="iskycc/wwan-proxy"
 SUPPORTED_ALPINE_SERIES="3.23"
 DEFAULT_HEALTH_URL="http://127.0.0.1:9090/api/health"
+ALPINE_WEB_DEFAULT="0.0.0.0:9090"
 
 INSTALL_BINARY="/usr/local/bin/wwan-proxy"
 INSTALL_INIT="/etc/init.d/wwan-proxy"
@@ -35,6 +36,7 @@ HEALTH_URL_EXPLICIT=0
 NO_START="${WWAN_PROXY_NO_START:-0}"
 FORCE_OS="${WWAN_PROXY_FORCE_OS:-0}"
 START_TIMEOUT="${WWAN_PROXY_START_TIMEOUT:-30}"
+FIREWALL_MODE="${WWAN_PROXY_FIREWALL:-open}"
 
 RUN_ID="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
 CURRENT_STEP="bootstrap"
@@ -60,6 +62,29 @@ INSTALLED_VERSION="unknown"
 BACKUP_DIR=""
 BINARY_STAGE=""
 INIT_STAGE=""
+FIREWALL_TRANSACTION=""
+FIREWALL_TRANSACTION_ACTIVE=0
+FIREWALL_ZONE=""
+FIREWALL_ADDED_RUNTIME=0
+FIREWALL_ADDED_PERMANENT=0
+UFW_RULE_ADDED=0
+NFT_FRAGMENT=""
+NFT_FRAGMENT_BACKUP=""
+NFT_FRAGMENT_EXISTED=0
+NFT_FRAGMENT_TOUCHED=0
+NFT_PUBLISH_STAGE=""
+NFT_RUNTIME_HANDLE=""
+NFT_RUNTIME_ADDED=0
+NFT_OLD_RUNTIME_HANDLE=""
+NFT_OLD_RUNTIME_REMOVED=0
+IPTABLES_RULE_ADDED=0
+IPTABLES_RULES_FILE="/etc/iptables/rules-save"
+IPTABLES_RULES_BACKUP=""
+IPTABLES_RULES_EXISTED=0
+IPTABLES_RULES_TOUCHED=0
+IPTABLES_PUBLISH_STAGE=""
+IPTABLES_OLD_PORTS_FILE=""
+IPTABLES_REMOVED_PORTS_FILE=""
 
 usage() {
 	cat <<'EOF'
@@ -76,18 +101,25 @@ Options:
   --checksum FILE        SHA256SUMS for --archive (required with --archive)
   --health-url URL       Post-start health endpoint
   --start-timeout SEC    Start/health timeout, 5-300 seconds (default: 30)
-  --no-start             Install files without enabling or starting OpenRC
+  --open-firewall        Inspect the firewall and open the WebUI TCP port
+                         when the active backend can be changed safely (default)
+  --check-firewall       Inspect and report firewall state without changing it
+  --skip-firewall        Skip host firewall inspection and changes
+  --no-start             Install files without starting OpenRC; firewall work
+                         is deferred until a later normal installer run
   --force-os             Allow an Alpine release other than 3.23
   -h, --help             Show this help
 
 Environment equivalents:
   WWAN_PROXY_VERSION, WWAN_PROXY_REPOSITORY, WWAN_PROXY_ARCHIVE,
   WWAN_PROXY_CHECKSUMS, WWAN_PROXY_HEALTH_URL, WWAN_PROXY_START_TIMEOUT,
-  WWAN_PROXY_NO_START, WWAN_PROXY_FORCE_OS
+  WWAN_PROXY_NO_START, WWAN_PROXY_FORCE_OS,
+  WWAN_PROXY_FIREWALL (open, check, or skip; default: open)
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-alpine.sh | sh
   sh install-alpine.sh --version build-0123456789ab
+  sh install-alpine.sh --check-firewall
   sh install-alpine.sh --archive ./wwan-proxy-linux-amd64-musl.tar.gz --checksum ./SHA256SUMS
 
 Persistent installer log:
@@ -127,6 +159,18 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -ge 2 ] || { echo "${PROGRAM_NAME}: --start-timeout requires a value" >&2; exit 2; }
 			START_TIMEOUT=$2
 			shift 2
+			;;
+		--open-firewall)
+			FIREWALL_MODE=open
+			shift
+			;;
+		--check-firewall)
+			FIREWALL_MODE=check
+			shift
+			;;
+		--skip-firewall)
+			FIREWALL_MODE=skip
+			shift
 			;;
 		--no-start)
 			NO_START=1
@@ -251,6 +295,1239 @@ is_true() {
 	esac
 }
 
+is_root_safe_file() {
+	safe_file_path=$1
+	[ -f "${safe_file_path}" ] && [ ! -L "${safe_file_path}" ] || return 1
+	safe_file_metadata=$(stat -c '%u:%a' "${safe_file_path}" 2>/dev/null || echo invalid)
+	[ "${safe_file_metadata%%:*}" = "0" ] || return 1
+	safe_file_mode=${safe_file_metadata#*:}
+	case "${safe_file_mode}" in
+		*[2367]|*[2367][0-7]) return 1 ;;
+	esac
+	return 0
+}
+
+is_root_safe_directory() {
+	safe_dir_path=$1
+	[ -d "${safe_dir_path}" ] && [ ! -L "${safe_dir_path}" ] || return 1
+	safe_dir_metadata=$(stat -c '%u:%a' "${safe_dir_path}" 2>/dev/null || echo invalid)
+	[ "${safe_dir_metadata%%:*}" = "0" ] || return 1
+	safe_dir_mode=${safe_dir_metadata#*:}
+	case "${safe_dir_mode}" in
+		*[2367]|*[2367][0-7]) return 1 ;;
+	esac
+	return 0
+}
+
+read_effective_web_listener() {
+	web_listener_error="${WORK_DIR}/web-listener-error"
+	if ! WEB_LISTEN=$("${INSTALL_BINARY}" -db "${DATABASE_PATH}" -web-default "${ALPINE_WEB_DEFAULT}" -print-web-listen 2>"${web_listener_error}"); then
+		append_output_to_log "read effective WebUI listener" "${web_listener_error}"
+		return 1
+	fi
+	WEB_LISTEN=$(printf '%s' "${WEB_LISTEN}" | tail -n 1 | tr -d '\r')
+	case "${WEB_LISTEN}" in
+		\[*\]:*)
+			WEB_HOST=${WEB_LISTEN#\[}
+			WEB_HOST=${WEB_HOST%%\]*}
+			WEB_PORT=${WEB_LISTEN##*:}
+			;;
+		*:*)
+			WEB_HOST=${WEB_LISTEN%:*}
+			WEB_PORT=${WEB_LISTEN##*:}
+			;;
+		*) return 1 ;;
+	esac
+	case "${WEB_PORT}" in
+		*[!0-9]*|"") return 1 ;;
+	esac
+	[ "${WEB_PORT}" -ge 1 ] && [ "${WEB_PORT}" -le 65535 ] || return 1
+	WEB_HOST_LOWER=$(printf '%s' "${WEB_HOST}" | tr '[:upper:]' '[:lower:]')
+	return 0
+}
+
+is_ipv4_literal() {
+	ipv4_value=$1
+	printf '%s\n' "${ipv4_value}" | awk -F. '
+		BEGIN { valid = 1 }
+		NR != 1 || NF != 4 { valid = 0; exit }
+		{
+			for (i = 1; i <= 4; i++) {
+				if ($i !~ /^[0-9]+$/ || $i + 0 > 255) {
+					valid = 0
+					exit
+				}
+			}
+		}
+		END { exit valid ? 0 : 1 }
+	'
+}
+
+is_loopback_web_host() {
+	case "${WEB_HOST_LOWER}" in
+		localhost|::1) return 0 ;;
+	esac
+	if is_ipv4_literal "${WEB_HOST_LOWER}" && [ "${WEB_HOST_LOWER%%.*}" -eq 127 ]; then
+		return 0
+	fi
+	return 1
+}
+
+sanitize_iptables_rules() {
+	iptables_rules_source=$1
+	iptables_rules_sanitized=$2
+	awk '
+		function ends_with_unescaped_quote(value, backslashes, position) {
+			if (substr(value, length(value), 1) != "\"") return 0
+			backslashes = 0
+			for (position = length(value) - 1; position >= 1 && substr(value, position, 1) == "\\"; position--) backslashes++
+			return backslashes % 2 == 0
+		}
+		{
+			output = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i == "-m" && i < NF && $(i + 1) == "comment") {
+					i++
+					continue
+				}
+				if ($i == "--comment") {
+					if (i < NF) {
+						i++
+						if (substr($i, 1, 1) == "\"" && !ends_with_unescaped_quote($i)) {
+							while (i < NF && !ends_with_unescaped_quote($i)) i++
+						}
+					}
+					continue
+				}
+				output = output (output == "" ? "" : " ") $i
+			}
+			print output
+		}
+	' "${iptables_rules_source}" >"${iptables_rules_sanitized}"
+}
+
+extract_iptables_filter_input_rules() {
+	iptables_rules_source=$1
+	iptables_input_output=$2
+	awk '
+		/^\*/ {
+			saw_tables = 1
+			table_name = $1
+			next
+		}
+		$1 == "COMMIT" {
+			table_name = ""
+			next
+		}
+		{
+			if (saw_tables && table_name != "*filter") next
+			rule_start = 0
+			for (i = 1; i < NF; i++) {
+				if (($i == "-A" || $i == "-P") && $(i + 1) == "INPUT") {
+					rule_start = i
+					break
+				}
+			}
+			if (rule_start == 0) next
+			output = ""
+			for (i = rule_start; i <= NF; i++) output = output (output == "" ? "" : " ") $i
+			print output
+		}
+	' "${iptables_rules_source}" >"${iptables_input_output}"
+}
+
+live_iptables_restricts_input() {
+	live_iptables_file=$1
+	command -v iptables-save >/dev/null 2>&1 || return 1
+	iptables-save >"${live_iptables_file}" 2>>"${INSTALL_LOG}" || return 1
+	live_iptables_sanitized="${live_iptables_file}.sanitized"
+	sanitize_iptables_rules "${live_iptables_file}" "${live_iptables_sanitized}" || return 1
+	grep -Eq '^:INPUT (DROP|REJECT) |(^|[[:space:]])-A INPUT .* -j (DROP|REJECT)([[:space:]]|$)' "${live_iptables_sanitized}"
+}
+
+iptables_chain_allows_tcp_port() {
+	iptables_allow_file=$1
+	iptables_allow_port=$2
+	awk -v wanted_port="${iptables_allow_port}" '
+		{
+			protocol = ""
+			destination_port = ""
+			target = ""
+			connection_state = ""
+			negated = 0
+			exact_allow = 1
+			for (i = 1; i <= NF; i++) {
+				if ($i == "-p" && i < NF) protocol = $(i + 1)
+				if ($i == "--dport" && i < NF) destination_port = $(i + 1)
+				if (($i == "-j" || $i == "-g") && i < NF) target = $(i + 1)
+				if ($i == "--ctstate" && i < NF) connection_state = $(i + 1)
+				if ($i == "!") negated = 1
+			}
+			if ($1 != "-A" || $2 != "INPUT") next
+			for (i = 3; i <= NF; i++) {
+				if (($i == "-p" || $i == "--dport" || $i == "-j") && i < NF) {
+					i++
+					continue
+				}
+				if ($i == "-m" && i < NF && $(i + 1) == "tcp") {
+					i++
+					continue
+				}
+				exact_allow = 0
+			}
+			if (target == "ACCEPT" && protocol == "tcp" && destination_port == wanted_port && !negated && exact_allow && !blocked) found = 1
+			if (target == "DROP" || target == "REJECT") {
+				if (protocol != "" && protocol != "tcp") next
+				if (destination_port != "" && destination_port != wanted_port) next
+				if (connection_state == "INVALID") next
+				blocked = 1
+			}
+			if (target != "" && target != "ACCEPT" && target != "DROP" && target != "REJECT" && target != "LOG") blocked = 1
+		}
+		END { exit found ? 0 : 1 }
+	' "${iptables_allow_file}"
+}
+
+iptables_chain_has_complex_terminal() {
+	iptables_terminal_file=$1
+	iptables_terminal_port=$2
+	awk -v wanted_port="${iptables_terminal_port}" '
+		{
+			protocol = ""
+			destination_port = ""
+			target = ""
+			connection_state = ""
+			negated = 0
+			for (i = 1; i <= NF; i++) {
+				if ($i == "-p" && i < NF) protocol = $(i + 1)
+				if ($i == "--dport" && i < NF) destination_port = $(i + 1)
+				if (($i == "-j" || $i == "-g") && i < NF) target = $(i + 1)
+				if ($i == "--ctstate" && i < NF) connection_state = $(i + 1)
+				if ($i == "!") negated = 1
+			}
+			if ($1 != "-A" || $2 != "INPUT" || target == "" || target == "ACCEPT" || target == "LOG") next
+			if (protocol != "" && protocol != "tcp" && protocol != "all" && !negated) next
+			if (destination_port != "" && destination_port != wanted_port && !negated) next
+			if ((target == "DROP" || target == "REJECT") && connection_state == "INVALID" && !negated) next
+			complex = 1
+		}
+		END { exit complex ? 0 : 1 }
+	' "${iptables_terminal_file}"
+}
+
+iptables_other_tables_have_complex_input() {
+	iptables_tables_file=$1
+	iptables_tables_port=$2
+	awk -v wanted_port="${iptables_tables_port}" '
+		/^\*/ { table_name = $1; next }
+		$1 == "COMMIT" { table_name = ""; next }
+		{
+			rule_start = 0
+			for (i = 1; i < NF; i++) if ($i == "-A" && $(i + 1) == "INPUT") rule_start = i
+			if (rule_start == 0 || table_name == "*filter") next
+			protocol = ""
+			destination_port = ""
+			target = ""
+			negated = 0
+			for (i = rule_start + 2; i <= NF; i++) {
+				if ($i == "-p" && i < NF) protocol = $(i + 1)
+				if ($i == "--dport" && i < NF) destination_port = $(i + 1)
+				if (($i == "-j" || $i == "-g") && i < NF) target = $(i + 1)
+				if ($i == "!") negated = 1
+			}
+			if (target == "") next
+			if (protocol != "" && protocol != "tcp" && protocol != "all" && !negated) next
+			if (destination_port != "" && destination_port != wanted_port && !negated) next
+			if (target == "ACCEPT" || target == "LOG" || target == "NFLOG" || target == "MARK" || target == "CONNMARK" || target == "CT" || target == "NOTRACK" || target == "TRACE" || target == "SECMARK" || target == "CONNSECMARK" || target == "TCPMSS" || target == "TOS" || target == "TTL" || target == "DSCP" || target == "CLASSIFY") next
+			complex = 1
+		}
+		END { exit complex ? 0 : 1 }
+	' "${iptables_tables_file}"
+}
+
+load_iptables_service_config() {
+	iptables_conf=/etc/conf.d/iptables
+	if ! is_root_safe_file "${iptables_conf}"; then
+		log_line WARN "${iptables_conf} is missing or unsafe; refusing to infer iptables persistence settings"
+		return 1
+	fi
+	iptables_save_values="${WORK_DIR}/iptables-save-values"
+	{
+		sed -n 's/^[[:space:]]*IPTABLES_SAVE[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "${iptables_conf}"
+		sed -n "s/^[[:space:]]*IPTABLES_SAVE[[:space:]]*=[[:space:]]*'\([^']*\)'[[:space:]]*$/\1/p" "${iptables_conf}"
+		sed -n 's/^[[:space:]]*IPTABLES_SAVE[[:space:]]*=[[:space:]]*\(\/[A-Za-z0-9_.\/-]*\)[[:space:]]*$/\1/p' "${iptables_conf}"
+	} >"${iptables_save_values}"
+	iptables_save_count=$(sed '/^$/d' "${iptables_save_values}" | wc -l | tr -d '[:space:]')
+	if [ "${iptables_save_count}" -ne 1 ]; then
+		log_line WARN "${iptables_conf} must contain one simple absolute IPTABLES_SAVE assignment; found ${iptables_save_count}"
+		return 1
+	fi
+	IPTABLES_RULES_FILE=$(sed '/^$/d' "${iptables_save_values}" | head -n 1)
+	case "${IPTABLES_RULES_FILE}" in
+		/*) ;;
+		*) log_line WARN "IPTABLES_SAVE is not absolute: ${IPTABLES_RULES_FILE}"; return 1 ;;
+	esac
+	iptables_netns_line=$(sed -n 's/^[[:space:]]*netns[[:space:]]*=[[:space:]]*\(.*\)$/\1/p' "${iptables_conf}" | tail -n 1)
+	case "${iptables_netns_line}" in
+		""|'""'|"''") ;;
+		*) log_line WARN "iptables is configured for a network namespace; automatic host firewall changes are unsafe"; return 1 ;;
+	esac
+	return 0
+}
+
+record_firewall_snapshot() {
+	log_line INFO "capturing host firewall state for WebUI listener=${WEB_LISTEN}"
+	if command -v firewall-cmd >/dev/null 2>&1; then
+		firewall_snapshot="${WORK_DIR}/firewalld-state"
+		{ firewall-cmd --state; firewall-cmd --get-active-zones; firewall-cmd --get-default-zone; } >"${firewall_snapshot}" 2>&1 || true
+		append_output_to_log "firewalld state" "${firewall_snapshot}"
+	fi
+	if command -v ufw >/dev/null 2>&1; then
+		firewall_snapshot="${WORK_DIR}/ufw-state"
+		LC_ALL=C ufw status verbose >"${firewall_snapshot}" 2>&1 || true
+		append_output_to_log "UFW state" "${firewall_snapshot}"
+	fi
+	if command -v awall >/dev/null 2>&1; then
+		firewall_snapshot="${WORK_DIR}/awall-state"
+		awall list --all >"${firewall_snapshot}" 2>&1 || true
+		append_output_to_log "awall state" "${firewall_snapshot}"
+	fi
+	if command -v nft >/dev/null 2>&1; then
+		firewall_snapshot="${WORK_DIR}/nftables-state"
+		nft -a list ruleset >"${firewall_snapshot}" 2>&1 || true
+		append_output_to_log "nftables ruleset" "${firewall_snapshot}"
+	fi
+	if command -v iptables >/dev/null 2>&1; then
+		firewall_snapshot="${WORK_DIR}/iptables-state"
+		iptables -S >"${firewall_snapshot}" 2>&1 || true
+		append_output_to_log "iptables ruleset" "${firewall_snapshot}"
+	fi
+}
+
+firewall_rule_warning() {
+	firewall_warning_manager=$1
+	log_line WARN "could not confirm an allow rule for ${WEB_PORT}/tcp in ${firewall_warning_manager}; remote WebUI access may require a host firewall rule"
+	if [ "${FIREWALL_MODE}" = "check" ]; then
+		log_line WARN "review the firewall snapshot in ${INSTALL_LOG}; use --open-firewall only when the selected firewall zone or ruleset serves a trusted management network"
+	fi
+}
+
+clear_firewall_transaction() {
+	FIREWALL_TRANSACTION=""
+	FIREWALL_TRANSACTION_ACTIVE=0
+	FIREWALL_ADDED_RUNTIME=0
+	FIREWALL_ADDED_PERMANENT=0
+	UFW_RULE_ADDED=0
+	NFT_FRAGMENT_TOUCHED=0
+	NFT_RUNTIME_HANDLE=""
+	NFT_RUNTIME_ADDED=0
+	NFT_OLD_RUNTIME_HANDLE=""
+	NFT_OLD_RUNTIME_REMOVED=0
+	IPTABLES_RULE_ADDED=0
+	IPTABLES_RULES_TOUCHED=0
+	IPTABLES_OLD_PORTS_FILE=""
+	IPTABLES_REMOVED_PORTS_FILE=""
+}
+
+restore_nft_fragment() {
+	[ -n "${NFT_PUBLISH_STAGE}" ] && rm -f -- "${NFT_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1 || true
+	[ "${NFT_FRAGMENT_TOUCHED}" -eq 1 ] || return 0
+	if [ "${NFT_FRAGMENT_EXISTED}" -eq 1 ]; then
+		rm -f -- "${NFT_FRAGMENT}" >>"${INSTALL_LOG}" 2>&1 || return 1
+		cp -p "${NFT_FRAGMENT_BACKUP}" "${NFT_FRAGMENT}" >>"${INSTALL_LOG}" 2>&1 || return 1
+	else
+		rm -f -- "${NFT_FRAGMENT}" >>"${INSTALL_LOG}" 2>&1 || return 1
+	fi
+}
+
+restore_iptables_rules_file() {
+	[ -n "${IPTABLES_PUBLISH_STAGE}" ] && rm -f -- "${IPTABLES_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1 || true
+	[ "${IPTABLES_RULES_TOUCHED}" -eq 1 ] || return 0
+	if [ "${IPTABLES_RULES_EXISTED}" -eq 1 ]; then
+		rm -f -- "${IPTABLES_RULES_FILE}" >>"${INSTALL_LOG}" 2>&1 || return 1
+		cp -p "${IPTABLES_RULES_BACKUP}" "${IPTABLES_RULES_FILE}" >>"${INSTALL_LOG}" 2>&1 || return 1
+	else
+		rm -f -- "${IPTABLES_RULES_FILE}" >>"${INSTALL_LOG}" 2>&1 || return 1
+	fi
+}
+
+rollback_firewall_transaction() {
+	[ "${FIREWALL_TRANSACTION_ACTIVE}" -eq 1 ] || return 0
+	FIREWALL_TRANSACTION_ACTIVE=0
+	log_line WARN "rolling back incomplete ${FIREWALL_TRANSACTION} firewall change"
+	rollback_firewall_failed=0
+	case "${FIREWALL_TRANSACTION}" in
+		firewalld)
+			if [ "${FIREWALL_ADDED_RUNTIME}" -eq 1 ] && firewall-cmd --zone="${FIREWALL_ZONE}" --query-port="${WEB_PORT}/tcp" >/dev/null 2>&1; then
+				firewall-cmd --zone="${FIREWALL_ZONE}" --remove-port="${WEB_PORT}/tcp" >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+			fi
+			if [ "${FIREWALL_ADDED_PERMANENT}" -eq 1 ] && firewall-cmd --permanent --zone="${FIREWALL_ZONE}" --query-port="${WEB_PORT}/tcp" >/dev/null 2>&1; then
+				firewall-cmd --permanent --zone="${FIREWALL_ZONE}" --remove-port="${WEB_PORT}/tcp" >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+			fi
+			;;
+		ufw)
+			ufw_rollback_state="${WORK_DIR}/ufw-rollback-state"
+			LC_ALL=C ufw status >"${ufw_rollback_state}" 2>>"${INSTALL_LOG}" || true
+			if [ "${UFW_RULE_ADDED}" -eq 1 ] && grep -Eq "(^|[[:space:]])${WEB_PORT}/tcp[[:space:]]+ALLOW([[:space:]]|$)" "${ufw_rollback_state}"; then
+				ufw --force delete allow "${WEB_PORT}/tcp" >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+			fi
+			;;
+		nftables)
+			if [ "${NFT_RUNTIME_ADDED}" -eq 1 ] && [ -z "${NFT_RUNTIME_HANDLE}" ] && command -v nft >/dev/null 2>&1; then
+				nft_rollback_chain="${WORK_DIR}/nft-rollback-chain"
+				nft -a list chain inet filter input >"${nft_rollback_chain}" 2>>"${INSTALL_LOG}" || true
+				NFT_RUNTIME_HANDLE=$(sed -n '/tcp dport '"${WEB_PORT}"'.*accept.*comment "accept wwan-proxy WebUI"/s/.*# handle \([0-9][0-9]*\).*/\1/p' "${nft_rollback_chain}" | tail -n 1)
+			fi
+			if [ "${NFT_RUNTIME_ADDED}" -eq 1 ] && [ -n "${NFT_RUNTIME_HANDLE}" ]; then
+				nft delete rule inet filter input handle "${NFT_RUNTIME_HANDLE}" >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+			fi
+			restore_nft_fragment || rollback_firewall_failed=1
+			if [ "${NFT_OLD_RUNTIME_REMOVED}" -eq 1 ] && [ "${NFT_FRAGMENT_EXISTED}" -eq 1 ]; then
+				nft -f "${NFT_FRAGMENT_BACKUP}" >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+			fi
+			;;
+		iptables)
+			if [ "${IPTABLES_RULE_ADDED}" -eq 1 ] && iptables -C INPUT -p tcp --dport "${WEB_PORT}" -m comment --comment "wwan-proxy WebUI" -j ACCEPT >/dev/null 2>&1; then
+				iptables -D INPUT -p tcp --dport "${WEB_PORT}" -m comment --comment "wwan-proxy WebUI" -j ACCEPT >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+			fi
+			restore_iptables_rules_file || rollback_firewall_failed=1
+			if [ -n "${IPTABLES_REMOVED_PORTS_FILE}" ] && [ -f "${IPTABLES_REMOVED_PORTS_FILE}" ]; then
+				while IFS= read -r iptables_removed_port; do
+					case "${iptables_removed_port}" in *[!0-9]*|"") continue ;; esac
+					iptables -I INPUT 1 -p tcp --dport "${iptables_removed_port}" -m comment --comment "wwan-proxy WebUI" -j ACCEPT >>"${INSTALL_LOG}" 2>&1 || rollback_firewall_failed=1
+				done <"${IPTABLES_REMOVED_PORTS_FILE}"
+			fi
+			;;
+	esac
+	if [ "${rollback_firewall_failed}" -eq 1 ]; then
+		log_line ERROR "firewall rollback was incomplete; inspect ${INSTALL_LOG} and the live ruleset immediately"
+	else
+		log_line WARN "incomplete firewall change was rolled back"
+	fi
+	clear_firewall_transaction
+}
+
+configure_firewalld() {
+	firewalld_zones_file="${WORK_DIR}/firewalld-active-zones"
+	firewalld_zone_names="${WORK_DIR}/firewalld-active-zone-names"
+	firewall-cmd --get-active-zones >"${firewalld_zones_file}" 2>>"${INSTALL_LOG}" || return 1
+	awk '/^[^[:space:]]/ { print $1 }' "${firewalld_zones_file}" >"${firewalld_zone_names}"
+	firewalld_zone_count=$(wc -l <"${firewalld_zone_names}" | tr -d '[:space:]')
+	if [ "${firewalld_zone_count}" -gt 1 ]; then
+		log_line WARN "firewalld has multiple active zones; refusing to guess which zone should expose ${WEB_PORT}/tcp"
+		return 1
+	fi
+	if [ "${firewalld_zone_count}" -eq 1 ]; then
+		FIREWALL_ZONE=$(head -n 1 "${firewalld_zone_names}")
+	else
+		FIREWALL_ZONE=$(firewall-cmd --get-default-zone 2>>"${INSTALL_LOG}") || return 1
+	fi
+	firewalld_runtime_allowed=0
+	firewalld_permanent_allowed=0
+	firewall-cmd --zone="${FIREWALL_ZONE}" --query-port="${WEB_PORT}/tcp" >/dev/null 2>&1 && firewalld_runtime_allowed=1
+	firewall-cmd --permanent --zone="${FIREWALL_ZONE}" --query-port="${WEB_PORT}/tcp" >/dev/null 2>&1 && firewalld_permanent_allowed=1
+	if [ "${firewalld_runtime_allowed}" -eq 1 ] && [ "${firewalld_permanent_allowed}" -eq 1 ]; then
+		log_line INFO "firewalld already allows ${WEB_PORT}/tcp at runtime and permanently in zone=${FIREWALL_ZONE}"
+		return 0
+	fi
+	firewall_rule_warning "firewalld zone=${FIREWALL_ZONE}"
+	[ "${FIREWALL_MODE}" = "open" ] || return 0
+	FIREWALL_TRANSACTION="firewalld"
+	FIREWALL_TRANSACTION_ACTIVE=1
+	if [ "${firewalld_runtime_allowed}" -eq 0 ]; then
+		FIREWALL_ADDED_RUNTIME=1
+		run_step "activate firewalld WebUI rule in zone ${FIREWALL_ZONE}" \
+			firewall-cmd --zone="${FIREWALL_ZONE}" --add-port="${WEB_PORT}/tcp" || { rollback_firewall_transaction; return 1; }
+	fi
+	if [ "${firewalld_permanent_allowed}" -eq 0 ]; then
+		FIREWALL_ADDED_PERMANENT=1
+		run_step "persist firewalld WebUI rule in zone ${FIREWALL_ZONE}" \
+			firewall-cmd --permanent --zone="${FIREWALL_ZONE}" --add-port="${WEB_PORT}/tcp" || { rollback_firewall_transaction; return 1; }
+	fi
+	if ! firewall-cmd --zone="${FIREWALL_ZONE}" --query-port="${WEB_PORT}/tcp" >/dev/null 2>&1 || \
+		! firewall-cmd --permanent --zone="${FIREWALL_ZONE}" --query-port="${WEB_PORT}/tcp" >/dev/null 2>&1; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	clear_firewall_transaction
+	CURRENT_STEP="firewall"
+	log_line WARN "opened ${WEB_PORT}/tcp through firewalld zone=${FIREWALL_ZONE}; restrict the zone to trusted administrators"
+	return 0
+}
+
+configure_ufw() {
+	ufw_state_file="${WORK_DIR}/ufw-active-state"
+	LC_ALL=C ufw status >"${ufw_state_file}" 2>>"${INSTALL_LOG}" || return 1
+	if grep -Eq "(^|[[:space:]])${WEB_PORT}/tcp[[:space:]]+ALLOW([[:space:]]|$)" "${ufw_state_file}"; then
+		log_line INFO "UFW already contains an allow rule for ${WEB_PORT}/tcp"
+		return 0
+	fi
+	firewall_rule_warning "UFW"
+	[ "${FIREWALL_MODE}" = "open" ] || return 0
+	FIREWALL_TRANSACTION="ufw"
+	FIREWALL_TRANSACTION_ACTIVE=1
+	UFW_RULE_ADDED=1
+	run_step "allow WebUI ${WEB_PORT}/tcp through UFW" \
+		ufw allow "${WEB_PORT}/tcp" comment "wwan-proxy WebUI" || { rollback_firewall_transaction; return 1; }
+	if ! LC_ALL=C ufw status >"${ufw_state_file}" 2>>"${INSTALL_LOG}" || \
+		! grep -Eq "(^|[[:space:]])${WEB_PORT}/tcp[[:space:]]+ALLOW([[:space:]]|$)" "${ufw_state_file}"; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	clear_firewall_transaction
+	CURRENT_STEP="firewall"
+	log_line WARN "opened ${WEB_PORT}/tcp through UFW; restrict the rule to a trusted source network"
+	return 0
+}
+
+write_nft_fragment() {
+	nft_fragment_path=$1
+	nft_fragment_port=$2
+	{
+		printf '%s\n' '# Managed by the wwan-proxy Alpine installer.'
+		printf '%s\n' 'table inet filter {'
+		printf '\tchain input {\n'
+		printf '\t\ttcp dport %s accept comment "accept wwan-proxy WebUI"\n' "${nft_fragment_port}"
+		printf '\t}\n'
+		printf '%s\n' '}'
+	} >"${nft_fragment_path}"
+}
+
+nft_chain_has_complex_terminal() {
+	nft_terminal_chain=$1
+	sed -E 's/comment "[^"]*"//g; s/# handle [0-9]+//g; s/ct state invalid[[:space:]]+drop[[:space:]\\;]*//g; s/tcp dport 113[[:space:]]+reject[^;}]*;?//g' "${nft_terminal_chain}" | \
+		grep -E '(^|[[:space:];])(drop|reject|return|jump|goto|queue)([[:space:];]|$)' | \
+		grep -Ev 'type filter hook.*policy (accept|drop);' \
+		>/dev/null
+}
+
+nft_fragment_has_input_terminal() {
+	nft_input_fragment=$1
+	nft_allow_root_flush=${2:-0}
+	awk -v allow_root_flush="${nft_allow_root_flush}" '
+		function strip_hash_outside_quotes(value, output, quoted, escaped, position, character) {
+			output = ""
+			quoted = 0
+			escaped = 0
+			for (position = 1; position <= length(value); position++) {
+				character = substr(value, position, 1)
+				if (!quoted && character == "#") break
+				output = output character
+				if (!quoted) {
+					if (character == "\"") quoted = 1
+				} else if (escaped) {
+					escaped = 0
+				} else if (character == "\\") {
+					escaped = 1
+				} else if (character == "\"") {
+					quoted = 0
+				}
+			}
+			return output
+		}
+		function strip_nft_comment_expressions(value, output, position, after_keyword, character, escaped, previous) {
+			output = ""
+			position = 1
+			while (position <= length(value)) {
+				previous = position == 1 ? "" : substr(value, position - 1, 1)
+				if (substr(value, position, 7) == "comment" && previous !~ /[[:alnum:]_]/) {
+					after_keyword = position + 7
+					if (substr(value, after_keyword, 1) ~ /[[:space:]]/) {
+						while (substr(value, after_keyword, 1) ~ /[[:space:]]/) after_keyword++
+						if (substr(value, after_keyword, 1) == "\"") {
+							after_keyword++
+							escaped = 0
+							while (after_keyword <= length(value)) {
+								character = substr(value, after_keyword, 1)
+								after_keyword++
+								if (escaped) {
+									escaped = 0
+								} else if (character == "\\") {
+									escaped = 1
+								} else if (character == "\"") {
+									break
+								}
+							}
+							position = after_keyword
+							continue
+						}
+					}
+				}
+				output = output substr(value, position, 1)
+				position++
+			}
+			return output
+		}
+		{
+			line = strip_hash_outside_quotes($0)
+			line = strip_nft_comment_expressions(line)
+			if (line ~ /(^|[[:space:];])(flush|delete)[[:space:]]+(ruleset|table[[:space:]]+inet[[:space:]]+filter|chain[[:space:]]+inet[[:space:]]+filter[[:space:]]+input)([[:space:];]|$)/) {
+				root_flush = line ~ /^[[:space:]]*flush[[:space:]]+ruleset[[:space:];]*$/
+				if (!allow_root_flush || !root_flush) unsafe = 1
+			}
+			if (line ~ /(^|[[:space:];])(add|insert|replace)[[:space:]]+rule[[:space:]]+inet[[:space:]]+filter[[:space:]]+input([[:space:]]|$)/ && line ~ /(^|[[:space:];])(drop|reject|return|jump|goto|queue)([[:space:];]|$)/) unsafe = 1
+			brace_copy = line
+			opens = gsub(/\{/, "", brace_copy)
+			brace_copy = line
+			closes = gsub(/\}/, "", brace_copy)
+			if (!in_table && line ~ /table[[:space:]]+inet[[:space:]]+filter[[:space:]]*\{/) {
+				in_table = 1
+				table_depth = depth + 1
+			}
+			if (in_table && !in_chain && line ~ /chain[[:space:]]+input[[:space:]]*\{/) {
+				in_chain = 1
+				chain_depth = depth + opens
+			}
+			check_line = line
+			gsub(/policy[[:space:]]+(accept|drop)[[:space:]]*;/, "", check_line)
+			gsub(/ct[[:space:]]+state[[:space:]]+invalid[[:space:]]+drop[[:space:]\\;]*/, "", check_line)
+			gsub(/tcp[[:space:]]+dport[[:space:]]+113[[:space:]]+reject[^;}]*;?/, "", check_line)
+			if (in_chain && check_line ~ /(^|[[:space:];])(drop|reject|return|jump|goto|queue)([[:space:];]|$)/) unsafe = 1
+			depth += opens - closes
+			if (in_chain && depth < chain_depth) in_chain = 0
+			if (in_table && depth < table_depth) in_table = 0
+		}
+		END { exit unsafe ? 0 : 1 }
+	' "${nft_input_fragment}"
+}
+
+nft_persistent_fragments_are_safe() {
+	for nft_policy_fragment in /etc/nftables.d/*.nft /var/lib/nftables/*.nft; do
+		if [ ! -e "${nft_policy_fragment}" ] && [ ! -L "${nft_policy_fragment}" ]; then
+			continue
+		fi
+		if ! is_root_safe_file "${nft_policy_fragment}"; then
+			log_line WARN "nftables fragment is unsafe or writable by non-root users: ${nft_policy_fragment}"
+			return 1
+		fi
+		if [ "${nft_policy_fragment}" != "${NFT_FRAGMENT}" ]; then
+			if nft_fragment_has_input_terminal "${nft_policy_fragment}"; then
+				log_line WARN "nftables fragment has terminal control flow that this installer cannot safely order before: ${nft_policy_fragment}"
+			else
+				log_line WARN "unmanaged nftables startup fragment prevents the installer from proving persistent rule order: ${nft_policy_fragment}"
+			fi
+			return 1
+		fi
+	done
+	return 0
+}
+
+configure_standard_nftables() {
+	nft_chain_file="${WORK_DIR}/nft-input-chain"
+	nft_full_ruleset_file="${WORK_DIR}/nft-full-ruleset"
+	if ! nft -a list ruleset >"${nft_full_ruleset_file}" 2>>"${INSTALL_LOG}"; then
+		return 2
+	fi
+	nft_sanitized_ruleset="${WORK_DIR}/nft-full-ruleset-sanitized"
+	sed -E 's/comment "[^"]*"//g; s/# handle [0-9]+//g' "${nft_full_ruleset_file}" >"${nft_sanitized_ruleset}"
+	nft_input_hook_count=$(grep -Ec 'type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input([[:space:]]|;)' "${nft_sanitized_ruleset}" || true)
+	if [ "${nft_input_hook_count}" -ne 1 ]; then
+		log_line WARN "nftables has ${nft_input_hook_count} filter input base chains; one allow verdict cannot prove reachability across multiple hooks"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	if ! nft -a list chain inet filter input >"${nft_chain_file}" 2>>"${INSTALL_LOG}"; then
+		return 2
+	fi
+	nft_sanitized_chain="${WORK_DIR}/nft-input-chain-sanitized"
+	sed -E 's/comment "[^"]*"//g; s/# handle [0-9]+//g' "${nft_chain_file}" >"${nft_sanitized_chain}"
+	if nft_chain_has_complex_terminal "${nft_chain_file}"; then
+		log_line WARN "nftables inet/filter/input contains custom terminal control flow; textual port rules cannot prove remote reachability"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	nft_policy_count=$(grep -Ec 'type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input.*;[[:space:]]*policy[[:space:]]+(accept|drop);' "${nft_sanitized_chain}" || true)
+	if [ "${nft_policy_count}" -ne 1 ]; then
+		log_line WARN "nftables inet/filter/input has ${nft_policy_count} recognizable base-chain policy declarations"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	nft_runtime_allowed=0
+	if grep -Eq 'type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input.*;[[:space:]]*policy[[:space:]]+accept;' "${nft_sanitized_chain}"; then
+		nft_runtime_allowed=1
+		log_line INFO "nftables inet/filter/input has an ACCEPT policy and no applicable terminal deny rule"
+	elif ! grep -Eq 'type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input.*;[[:space:]]*policy[[:space:]]+drop;' "${nft_sanitized_chain}"; then
+		log_line WARN "nftables inet/filter/input policy is neither a recognizable ACCEPT nor DROP policy"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	grep -Eq "tcp dport ${WEB_PORT}([[:space:]]|$).*accept([[:space:]]|$)" "${nft_sanitized_chain}" && nft_runtime_allowed=1
+	if [ "${nft_runtime_allowed}" -eq 1 ]; then
+		log_line INFO "nftables inet/filter/input currently allows ${WEB_PORT}/tcp"
+	else
+		firewall_rule_warning "nftables inet/filter/input"
+	fi
+	[ "${FIREWALL_MODE}" = "open" ] || return 0
+
+	NFT_FRAGMENT="/etc/nftables.d/50_wwan-proxy.nft"
+	NFT_FRAGMENT_STAGE="${WORK_DIR}/50_wwan-proxy.nft"
+	NFT_FRAGMENT_BACKUP="${WORK_DIR}/50_wwan-proxy.nft.previous"
+	NFT_FRAGMENT_EXISTED=0
+	nft_managed_fragment=0
+	nft_previous_port=""
+	if [ -e "${NFT_FRAGMENT}" ] || [ -L "${NFT_FRAGMENT}" ]; then
+		if ! is_root_safe_file "${NFT_FRAGMENT}"; then
+			log_line WARN "refusing unsafe nftables fragment: ${NFT_FRAGMENT}"
+			return 1
+		fi
+		nft_previous_port=$(sed -n 's/^[[:space:]]*tcp dport \([0-9][0-9]*\) accept comment "accept wwan-proxy WebUI"$/\1/p' "${NFT_FRAGMENT}")
+		case "${nft_previous_port}" in
+			*[!0-9]*|"") ;;
+			*)
+				nft_expected_previous="${WORK_DIR}/50_wwan-proxy.expected-previous"
+				write_nft_fragment "${nft_expected_previous}" "${nft_previous_port}" || return 1
+				cmp -s "${nft_expected_previous}" "${NFT_FRAGMENT}" && nft_managed_fragment=1
+				;;
+		esac
+		if [ "${nft_managed_fragment}" -ne 1 ]; then
+			log_line WARN "${NFT_FRAGMENT} is not an installer-managed fragment; refusing to overwrite it"
+			return 1
+		fi
+		NFT_FRAGMENT_EXISTED=1
+		cp -p "${NFT_FRAGMENT}" "${NFT_FRAGMENT_BACKUP}" >>"${INSTALL_LOG}" 2>&1 || return 1
+	fi
+	if ! rc-service nftables status >/dev/null 2>&1; then
+		log_line WARN "nftables rules exist but the OpenRC service is not started; refusing to modify an unowned runtime ruleset"
+		return 1
+	fi
+	if ! is_root_safe_file /etc/nftables.nft || \
+		! grep -Eq '^[[:space:]]*include[[:space:]]+"/etc/nftables\.d/\*\.nft"[[:space:]]*(#.*)?$' /etc/nftables.nft; then
+		log_line WARN "nftables does not use the root-controlled Alpine /etc/nftables.d include layout; automatic modification skipped"
+		return 1
+	fi
+	nft_unexpected_includes="${WORK_DIR}/nft-unexpected-includes"
+	awk '
+		{
+			line = $0
+			sub(/#.*/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			if (line !~ /^include[[:space:]]+/) next
+			if (line != "include \"/etc/nftables.d/*.nft\"" && line != "include \"/var/lib/nftables/*.nft\"") print line
+		}
+	' /etc/nftables.nft >"${nft_unexpected_includes}"
+	if [ -s "${nft_unexpected_includes}" ]; then
+		append_output_to_log "unexpected nftables startup includes" "${nft_unexpected_includes}"
+		log_line WARN "nftables startup config includes paths outside the standard Alpine-owned layout; automatic modification skipped"
+		return 1
+	fi
+	if nft_fragment_has_input_terminal /etc/nftables.nft 1; then
+		log_line WARN "/etc/nftables.nft contains persistent input control flow that may precede the installer fragment; automatic modification skipped"
+		return 1
+	fi
+	nft_manifest="${WORK_DIR}/nftables-apk-manifest"
+	if ! LC_ALL=C apk manifest nftables >"${nft_manifest}" 2>>"${INSTALL_LOG}"; then
+		log_line WARN "could not read the installed nftables package manifest; automatic modification skipped"
+		return 1
+	fi
+	nft_manifest_digest=$(awk '$2 == "etc/nftables.nft" { print $1 }' "${nft_manifest}")
+	nft_manifest_count=$(printf '%s\n' "${nft_manifest_digest}" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+	if [ "${nft_manifest_count}" -ne 1 ]; then
+		log_line WARN "the installed nftables package manifest has ${nft_manifest_count} entries for /etc/nftables.nft; automatic modification skipped"
+		return 1
+	fi
+	case "${nft_manifest_digest}" in
+		sha1:*) nft_expected_digest=${nft_manifest_digest#sha1:}; nft_actual_digest=$(sha1sum /etc/nftables.nft | awk '{ print $1 }') ;;
+		sha256:*) nft_expected_digest=${nft_manifest_digest#sha256:}; nft_actual_digest=$(sha256sum /etc/nftables.nft | awk '{ print $1 }') ;;
+		sha512:*) nft_expected_digest=${nft_manifest_digest#sha512:}; nft_actual_digest=$(sha512sum /etc/nftables.nft | awk '{ print $1 }') ;;
+		*) log_line WARN "unsupported nftables manifest digest: ${nft_manifest_digest}"; return 1 ;;
+	esac
+	if [ "${nft_actual_digest}" != "${nft_expected_digest}" ]; then
+		log_line WARN "/etc/nftables.nft differs from the Alpine package-managed baseline; automatic modification skipped"
+		return 1
+	fi
+	if ! is_root_safe_directory /etc/nftables.d; then
+		log_line WARN "/etc/nftables.d is missing or writable by non-root users; automatic modification skipped"
+		return 1
+	fi
+	if ! is_root_safe_directory /var/lib/nftables; then
+		log_line WARN "/var/lib/nftables is missing or writable by non-root users; automatic modification skipped"
+		return 1
+	fi
+	if ! nft_persistent_fragments_are_safe; then
+		return 1
+	fi
+
+	NFT_OLD_RUNTIME_HANDLE=""
+	if [ -n "${nft_previous_port}" ] && [ "${nft_previous_port}" != "${WEB_PORT}" ]; then
+		nft_old_handles=$(sed -n '/tcp dport '"${nft_previous_port}"'.*accept.*comment "accept wwan-proxy WebUI"/s/.*# handle \([0-9][0-9]*\).*/\1/p' "${nft_chain_file}")
+		nft_old_handle_count=$(printf '%s\n' "${nft_old_handles}" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+		if [ "${nft_old_handle_count}" -gt 1 ]; then
+			log_line WARN "multiple installer-managed nftables rules exist for old port ${nft_previous_port}; refusing to guess which handle to remove"
+			return 1
+		fi
+		[ "${nft_old_handle_count}" -eq 1 ] && NFT_OLD_RUNTIME_HANDLE=${nft_old_handles}
+	fi
+
+	write_nft_fragment "${NFT_FRAGMENT_STAGE}" "${WEB_PORT}" || return 1
+	if [ "${NFT_FRAGMENT_EXISTED}" -eq 1 ] && [ "${nft_runtime_allowed}" -eq 1 ] && \
+		cmp -s "${NFT_FRAGMENT_STAGE}" "${NFT_FRAGMENT}"; then
+		if ! run_step "validate existing nftables startup rule for wwan-proxy WebUI" nft -c -f /etc/nftables.nft; then
+			return 1
+		fi
+		log_line INFO "nftables already allows ${WEB_PORT}/tcp in both the live and persistent installer-managed rulesets"
+		return 0
+	fi
+	NFT_PUBLISH_STAGE="/etc/nftables.d/.50_wwan-proxy.nft.install-${RUN_ID}"
+	if [ -e "${NFT_PUBLISH_STAGE}" ] || [ -L "${NFT_PUBLISH_STAGE}" ]; then
+		log_line WARN "refusing unexpected nftables staging path: ${NFT_PUBLISH_STAGE}"
+		return 1
+	fi
+	FIREWALL_TRANSACTION="nftables"
+	FIREWALL_TRANSACTION_ACTIVE=1
+	if ! cp "${NFT_FRAGMENT_STAGE}" "${NFT_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1 || \
+		! chown root:root "${NFT_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1 || \
+		! chmod 0644 "${NFT_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	NFT_FRAGMENT_TOUCHED=1
+	if ! mv -f "${NFT_PUBLISH_STAGE}" "${NFT_FRAGMENT}" >>"${INSTALL_LOG}" 2>&1; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	if ! run_step "validate nftables startup rules with wwan-proxy WebUI access" nft -c -f /etc/nftables.nft; then
+		rollback_firewall_transaction
+		return 1
+	fi
+
+	if [ "${nft_runtime_allowed}" -eq 0 ]; then
+		nft_apply_output="${WORK_DIR}/nft-runtime-apply"
+		NFT_RUNTIME_ADDED=1
+		log_line INFO "STEP: add the WebUI rule to the live nftables chain without flushing runtime-only rules"
+		if ! nft -ae -f "${NFT_FRAGMENT_STAGE}" >"${nft_apply_output}" 2>&1; then
+			append_output_to_log "nftables incremental apply" "${nft_apply_output}"
+			rollback_firewall_transaction
+			return 1
+		fi
+		append_output_to_log "nftables incremental apply" "${nft_apply_output}"
+		NFT_RUNTIME_HANDLE=$(sed -n '/^add rule inet filter input tcp dport '"${WEB_PORT}"' accept comment "accept wwan-proxy WebUI" # handle /s/.*# handle \([0-9][0-9]*\).*/\1/p' "${nft_apply_output}" | tail -n 1)
+	fi
+	if ! nft -a list chain inet filter input >"${nft_chain_file}" 2>>"${INSTALL_LOG}"; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	sed -E 's/comment "[^"]*"//g; s/# handle [0-9]+//g' "${nft_chain_file}" >"${nft_sanitized_chain}"
+	if ! grep -Eq "tcp dport ${WEB_PORT}([[:space:]]|$).*accept([[:space:]]|$)" "${nft_sanitized_chain}"; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	if [ "${NFT_RUNTIME_ADDED}" -eq 1 ] && \
+		! grep -Eq "tcp dport ${WEB_PORT}([[:space:]]|$).*accept.*comment \"accept wwan-proxy WebUI\"" "${nft_chain_file}"; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	if [ "${NFT_RUNTIME_ADDED}" -eq 1 ] && [ -z "${NFT_RUNTIME_HANDLE}" ]; then
+		NFT_RUNTIME_HANDLE=$(sed -n '/tcp dport '"${WEB_PORT}"'.*accept.*comment "accept wwan-proxy WebUI"/s/.*# handle \([0-9][0-9]*\).*/\1/p' "${nft_chain_file}" | tail -n 1)
+		if [ -z "${NFT_RUNTIME_HANDLE}" ]; then
+			rollback_firewall_transaction
+			return 1
+		fi
+	fi
+	if [ -n "${NFT_OLD_RUNTIME_HANDLE}" ]; then
+		if ! nft delete rule inet filter input handle "${NFT_OLD_RUNTIME_HANDLE}" >>"${INSTALL_LOG}" 2>&1; then
+			rollback_firewall_transaction
+			return 1
+		fi
+		NFT_OLD_RUNTIME_REMOVED=1
+	fi
+	clear_firewall_transaction
+	CURRENT_STEP="firewall"
+	log_line WARN "opened ${WEB_PORT}/tcp in Alpine nftables; restrict access to a trusted source or interface"
+	return 0
+}
+
+configure_standard_iptables() {
+	iptables_chain_raw="${WORK_DIR}/iptables-input-chain-raw"
+	if ! iptables -S INPUT >"${iptables_chain_raw}" 2>>"${INSTALL_LOG}"; then
+		return 2
+	fi
+	iptables_chain_sanitized="${WORK_DIR}/iptables-input-chain-sanitized"
+	iptables_chain_file="${WORK_DIR}/iptables-input-chain"
+	sanitize_iptables_rules "${iptables_chain_raw}" "${iptables_chain_sanitized}" || return 2
+	extract_iptables_filter_input_rules "${iptables_chain_sanitized}" "${iptables_chain_file}" || return 2
+	iptables_all_tables_raw="${WORK_DIR}/iptables-all-tables-raw"
+	iptables_all_tables_file="${WORK_DIR}/iptables-all-tables"
+	if ! iptables-save >"${iptables_all_tables_raw}" 2>>"${INSTALL_LOG}"; then
+		return 2
+	fi
+	sanitize_iptables_rules "${iptables_all_tables_raw}" "${iptables_all_tables_file}" || return 2
+	if iptables_other_tables_have_complex_input "${iptables_all_tables_file}" "${WEB_PORT}"; then
+		log_line WARN "iptables has a non-filter INPUT terminal or custom chain that may block ${WEB_PORT}/tcp; automatic reachability cannot be proven"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	iptables_runtime_allowed=0
+	iptables_runtime_needs_rule=0
+	if iptables_chain_allows_tcp_port "${iptables_chain_file}" "${WEB_PORT}"; then
+		iptables_runtime_allowed=1
+		log_line INFO "iptables already contains an unrestricted explicit allow rule for ${WEB_PORT}/tcp"
+	elif iptables_chain_has_complex_terminal "${iptables_chain_file}" "${WEB_PORT}"; then
+		log_line WARN "iptables INPUT contains a custom deny or control-flow rule that may apply to ${WEB_PORT}/tcp; refusing to insert a broader allow rule ahead of it"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	elif grep -Eq '^-P INPUT (DROP|REJECT)$' "${iptables_chain_file}"; then
+		iptables_runtime_needs_rule=1
+		firewall_rule_warning "iptables INPUT"
+	else
+		log_line INFO "iptables has no explicit INPUT deny policy requiring a dedicated ${WEB_PORT}/tcp rule"
+	fi
+	[ "${FIREWALL_MODE}" = "open" ] || return 0
+	if ! rc-service iptables status >/dev/null 2>&1; then
+		if [ "${iptables_runtime_allowed}" -eq 1 ] || [ "${iptables_runtime_needs_rule}" -eq 0 ]; then
+			log_line INFO "iptables OpenRC is inactive, but the live INPUT ruleset does not block ${WEB_PORT}/tcp"
+			return 0
+		fi
+		log_line WARN "iptables OpenRC service is not started; refusing to modify an unowned runtime ruleset"
+		return 1
+	fi
+	load_iptables_service_config || return 1
+	iptables_rules_dir=$(dirname "${IPTABLES_RULES_FILE}")
+	iptables_rules_name=$(basename "${IPTABLES_RULES_FILE}")
+	if ! is_root_safe_directory "${iptables_rules_dir}"; then
+		log_line WARN "${iptables_rules_dir} is missing or writable by non-root users; refusing to persist an iptables rule"
+		return 1
+	fi
+	if [ ! -e "${IPTABLES_RULES_FILE}" ] && [ ! -L "${IPTABLES_RULES_FILE}" ]; then
+		log_line WARN "${IPTABLES_RULES_FILE} is missing; refusing to derive persistent rules from possibly temporary runtime state"
+		return 1
+	fi
+	if ! is_root_safe_file "${IPTABLES_RULES_FILE}"; then
+		log_line WARN "refusing unsafe iptables rules file: ${IPTABLES_RULES_FILE}"
+		return 1
+	fi
+	if head -n 1 "${IPTABLES_RULES_FILE}" | grep -Fqx '# rules-save generated by awall'; then
+		log_line WARN "${IPTABLES_RULES_FILE} is managed by awall; modify and activate the awall policy instead"
+		return 1
+	fi
+	if ! grep -Fqx '*filter' "${IPTABLES_RULES_FILE}" || ! grep -Eq '^:INPUT (ACCEPT|DROP|REJECT) ' "${IPTABLES_RULES_FILE}"; then
+		log_line WARN "${IPTABLES_RULES_FILE} has no standard filter/INPUT section; automatic modification skipped"
+		return 1
+	fi
+	iptables_persistent_sanitized="${WORK_DIR}/iptables-rules-save-sanitized"
+	iptables_persistent_input="${WORK_DIR}/iptables-rules-save-input"
+	sanitize_iptables_rules "${IPTABLES_RULES_FILE}" "${iptables_persistent_sanitized}" || return 1
+	extract_iptables_filter_input_rules "${iptables_persistent_sanitized}" "${iptables_persistent_input}" || return 1
+	if iptables_other_tables_have_complex_input "${iptables_persistent_sanitized}" "${WEB_PORT}"; then
+		log_line WARN "${IPTABLES_RULES_FILE} contains a non-filter INPUT terminal or custom chain; automatic modification skipped"
+		return 1
+	fi
+	iptables_persistent_allowed=0
+	if iptables_chain_allows_tcp_port "${iptables_persistent_input}" "${WEB_PORT}"; then
+		iptables_persistent_allowed=1
+		log_line INFO "${IPTABLES_RULES_FILE} already persists an unrestricted ${WEB_PORT}/tcp allow before applicable terminal rules"
+	elif iptables_chain_has_complex_terminal "${iptables_persistent_input}" "${WEB_PORT}"; then
+		log_line WARN "${IPTABLES_RULES_FILE} contains a persistent INPUT custom deny or control-flow rule that may precede the WebUI allow; automatic modification skipped"
+		return 1
+	elif grep -Eq '^:INPUT ACCEPT ' "${iptables_persistent_sanitized}"; then
+		iptables_persistent_allowed=1
+		log_line INFO "${IPTABLES_RULES_FILE} persists an ACCEPT policy with no applicable terminal deny rule"
+	else
+		firewall_rule_warning "persistent iptables INPUT"
+	fi
+	if { [ "${iptables_runtime_allowed}" -eq 1 ] || [ "${iptables_runtime_needs_rule}" -eq 0 ]; } && \
+		[ "${iptables_persistent_allowed}" -eq 1 ]; then
+		log_line INFO "iptables allows ${WEB_PORT}/tcp in both the live and startup rulesets"
+		return 0
+	fi
+	IPTABLES_RULES_EXISTED=1
+	IPTABLES_RULES_BACKUP="${WORK_DIR}/iptables-rules-save.previous"
+	cp -p "${IPTABLES_RULES_FILE}" "${IPTABLES_RULES_BACKUP}" >>"${INSTALL_LOG}" 2>&1 || return 1
+	iptables_rules_stage="${WORK_DIR}/iptables-rules-save"
+	awk -v web_port="${WEB_PORT}" '
+		BEGIN { in_filter = 0; inserted = 0 }
+		$0 == "*filter" { in_filter = 1 }
+		in_filter && /--comment "wwan-proxy WebUI"/ { next }
+		in_filter && !inserted && ($1 == "-A" || ($1 ~ /^\[[0-9]+:[0-9]+\]$/ && $2 == "-A") || $0 == "COMMIT") {
+			print "-A INPUT -p tcp -m tcp --dport " web_port " -m comment --comment \"wwan-proxy WebUI\" -j ACCEPT"
+			inserted = 1
+		}
+		{ print }
+		in_filter && $0 == "COMMIT" { in_filter = 0 }
+		END { if (!inserted) exit 1 }
+	' "${IPTABLES_RULES_FILE}" >"${iptables_rules_stage}" || return 1
+	iptables_restore_test="${WORK_DIR}/iptables-restore-test"
+	if ! iptables-restore --test <"${iptables_rules_stage}" >"${iptables_restore_test}" 2>&1; then
+		append_output_to_log "validate persistent iptables rules" "${iptables_restore_test}"
+		return 1
+	fi
+	IPTABLES_OLD_PORTS_FILE="${WORK_DIR}/iptables-old-managed-ports"
+	IPTABLES_REMOVED_PORTS_FILE="${WORK_DIR}/iptables-removed-managed-ports"
+	sed -n '/--comment "wwan-proxy WebUI"/s/.*--dport \([0-9][0-9]*\).*/\1/p' "${iptables_chain_raw}" >"${IPTABLES_OLD_PORTS_FILE}"
+	: >"${IPTABLES_REMOVED_PORTS_FILE}"
+	IPTABLES_PUBLISH_STAGE="${iptables_rules_dir}/.${iptables_rules_name}.install-${RUN_ID}"
+	if [ -e "${IPTABLES_PUBLISH_STAGE}" ] || [ -L "${IPTABLES_PUBLISH_STAGE}" ]; then
+		log_line WARN "refusing unexpected iptables staging path: ${IPTABLES_PUBLISH_STAGE}"
+		return 1
+	fi
+	FIREWALL_TRANSACTION="iptables"
+	FIREWALL_TRANSACTION_ACTIVE=1
+	if ! cp "${iptables_rules_stage}" "${IPTABLES_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1 || \
+		! chown root:root "${IPTABLES_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1 || \
+		! chmod 0600 "${IPTABLES_PUBLISH_STAGE}" >>"${INSTALL_LOG}" 2>&1; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	IPTABLES_RULES_TOUCHED=1
+	if ! mv -f "${IPTABLES_PUBLISH_STAGE}" "${IPTABLES_RULES_FILE}" >>"${INSTALL_LOG}" 2>&1; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	while IFS= read -r iptables_old_port; do
+		case "${iptables_old_port}" in *[!0-9]*|"") continue ;; esac
+		if ! iptables -D INPUT -p tcp --dport "${iptables_old_port}" -m comment --comment "wwan-proxy WebUI" -j ACCEPT >>"${INSTALL_LOG}" 2>&1; then
+			rollback_firewall_transaction
+			return 1
+		fi
+		printf '%s\n' "${iptables_old_port}" >>"${IPTABLES_REMOVED_PORTS_FILE}"
+	done <"${IPTABLES_OLD_PORTS_FILE}"
+	IPTABLES_RULE_ADDED=1
+	run_step "allow WebUI ${WEB_PORT}/tcp through iptables" \
+		iptables -I INPUT 1 -p tcp --dport "${WEB_PORT}" -m comment --comment "wwan-proxy WebUI" -j ACCEPT || { rollback_firewall_transaction; return 1; }
+	if ! iptables -C INPUT -p tcp --dport "${WEB_PORT}" -m comment --comment "wwan-proxy WebUI" -j ACCEPT >/dev/null 2>&1 || \
+		! grep -Fq -- '--comment "wwan-proxy WebUI"' "${IPTABLES_RULES_FILE}"; then
+		rollback_firewall_transaction
+		return 1
+	fi
+	clear_firewall_transaction
+	CURRENT_STEP="firewall"
+	log_line WARN "opened ${WEB_PORT}/tcp through iptables; restrict the rule to a trusted source network"
+	return 0
+}
+
+configure_host_firewall() {
+	CURRENT_STEP="firewall"
+	if ! read_effective_web_listener; then
+		log_line WARN "could not determine the effective WebUI listener; host firewall inspection skipped"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	log_line INFO "effective Alpine WebUI listener=${WEB_LISTEN}"
+	if [ "${FIREWALL_MODE}" = "skip" ]; then
+		log_line WARN "host firewall inspection skipped by request"
+		return 0
+	fi
+	if is_loopback_web_host; then
+		log_line INFO "WebUI is loopback-only; no inbound host firewall rule is needed"
+		return 0
+	fi
+	log_line INFO "remote access URL=http://<Alpine-host-IP>:${WEB_PORT}"
+	log_line WARN "if no administrator has been initialized, the first WebUI visitor can create it; expose ${WEB_PORT}/tcp only to a trusted management network"
+	record_firewall_snapshot
+
+	firewalld_active=0
+	ufw_active=0
+	awall_active=0
+	awall_configured=0
+	awall_owned_rules=0
+	iptables_service_active=0
+	nftables_service_active=0
+	firewalld_service_enabled=0
+	ufw_service_enabled=0
+	iptables_service_enabled=0
+	nftables_service_enabled=0
+	if command -v firewall-cmd >/dev/null 2>&1 && [ "$(firewall-cmd --state 2>/dev/null || true)" = "running" ]; then
+		firewalld_active=1
+	fi
+	if command -v ufw >/dev/null 2>&1; then
+		ufw_detection="${WORK_DIR}/ufw-detection"
+		LC_ALL=C ufw status >"${ufw_detection}" 2>/dev/null || true
+		grep -Eq '^Status:[[:space:]]+active$' "${ufw_detection}" && ufw_active=1
+	fi
+	if command -v awall >/dev/null 2>&1; then
+		awall_detection="${WORK_DIR}/awall-detection"
+		awall list >"${awall_detection}" 2>/dev/null || true
+		awk '$2 == "enabled" || $2 == "required" { found = 1 } END { exit found ? 0 : 1 }' "${awall_detection}" && awall_configured=1
+		if { is_root_safe_file /etc/iptables/rules-save && head -n 1 /etc/iptables/rules-save | grep -Fqx '# rules-save generated by awall'; } || \
+			{ is_root_safe_file /etc/iptables/rules6-save && head -n 1 /etc/iptables/rules6-save | grep -Fqx '# rules6-save generated by awall'; }; then
+			awall_owned_rules=1
+		fi
+		awall_live_rules="${WORK_DIR}/awall-live-iptables"
+		if { [ "${awall_configured}" -eq 1 ] || [ "${awall_owned_rules}" -eq 1 ]; } && \
+			live_iptables_restricts_input "${awall_live_rules}"; then
+			awall_active=1
+		elif [ "${awall_configured}" -eq 1 ] || [ "${awall_owned_rules}" -eq 1 ]; then
+			log_line INFO "awall policy metadata exists but no live restrictive IPv4 INPUT rules were found; continuing with the active ruleset"
+		fi
+	fi
+	command -v iptables >/dev/null 2>&1 && rc-service iptables status >/dev/null 2>&1 && iptables_service_active=1
+	command -v nft >/dev/null 2>&1 && rc-service nftables status >/dev/null 2>&1 && nftables_service_active=1
+	openrc_firewall_services="${WORK_DIR}/openrc-firewall-services"
+	if ! rc-update show >"${openrc_firewall_services}" 2>>"${INSTALL_LOG}"; then
+		log_line WARN "could not inspect OpenRC firewall enablement; automatic firewall changes are unsafe"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	awk '$1 == "firewalld" && $2 == "|" { found = 1 } END { exit found ? 0 : 1 }' "${openrc_firewall_services}" && firewalld_service_enabled=1
+	awk '$1 == "ufw" && $2 == "|" { found = 1 } END { exit found ? 0 : 1 }' "${openrc_firewall_services}" && ufw_service_enabled=1
+	awk '$1 == "iptables" && $2 == "|" { found = 1 } END { exit found ? 0 : 1 }' "${openrc_firewall_services}" && iptables_service_enabled=1
+	awk '$1 == "nftables" && $2 == "|" { found = 1 } END { exit found ? 0 : 1 }' "${openrc_firewall_services}" && nftables_service_enabled=1
+	log_line INFO "OpenRC firewall services firewalld_active=${firewalld_active} firewalld_enabled=${firewalld_service_enabled} ufw_active=${ufw_active} ufw_enabled=${ufw_service_enabled} iptables_started=${iptables_service_active} iptables_enabled=${iptables_service_enabled} nftables_started=${nftables_service_active} nftables_enabled=${nftables_service_enabled}"
+	if { [ "${firewalld_service_enabled}" -eq 1 ] && [ "${firewalld_active}" -eq 0 ]; } || \
+		{ [ "${ufw_service_enabled}" -eq 1 ] && [ "${ufw_active}" -eq 0 ]; } || \
+		{ [ "${iptables_service_enabled}" -eq 1 ] && [ "${iptables_service_active}" -eq 0 ]; } || \
+		{ [ "${nftables_service_enabled}" -eq 1 ] && [ "${nftables_service_active}" -eq 0 ]; }; then
+		log_line WARN "an OpenRC firewall service is enabled but not active; its next start may load rules that differ from the live ruleset"
+		firewall_rule_warning "enabled but inactive OpenRC firewall service"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	native_nft_input_active=0
+	firewalld_nft_backend_active=0
+	iptables_nft_input_hook_count=0
+	nft_live_input_hook_count=0
+	nft_live_audit_failed=0
+	if command -v nft >/dev/null 2>&1; then
+		firewall_owner_ruleset="${WORK_DIR}/firewall-owner-ruleset"
+		if nft list ruleset >"${firewall_owner_ruleset}" 2>>"${INSTALL_LOG}"; then
+			firewall_owner_ruleset_sanitized="${WORK_DIR}/firewall-owner-ruleset-sanitized"
+			sed -E 's/comment "[^"]*"//g; s/# handle [0-9]+//g' "${firewall_owner_ruleset}" >"${firewall_owner_ruleset_sanitized}"
+			nft_live_input_hook_count=$(grep -Ec 'type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input([[:space:]]|;)' "${firewall_owner_ruleset_sanitized}" || true)
+		else
+			nft_live_audit_failed=1
+		fi
+		nft list chain inet filter input >/dev/null 2>&1 && native_nft_input_active=1
+		nft list chain inet firewalld filter_INPUT >/dev/null 2>&1 && firewalld_nft_backend_active=1
+		if nft list chain ip filter INPUT >/dev/null 2>&1; then
+			iptables_nft_input_hook_count=$((iptables_nft_input_hook_count + 1))
+		fi
+		if nft list chain ip6 filter INPUT >/dev/null 2>&1; then
+			iptables_nft_input_hook_count=$((iptables_nft_input_hook_count + 1))
+		fi
+	fi
+	firewalld_raw_iptables_restrictive=0
+	if [ "${firewalld_active}" -eq 1 ] && [ "${firewalld_nft_backend_active}" -eq 1 ] && command -v iptables-save >/dev/null 2>&1; then
+		firewalld_raw_iptables="${WORK_DIR}/firewalld-raw-iptables"
+		live_iptables_restricts_input "${firewalld_raw_iptables}" && firewalld_raw_iptables_restrictive=1
+	fi
+	log_line INFO "live firewall ownership nft_input_hooks=${nft_live_input_hook_count} iptables_nft_owned_hooks=${iptables_nft_input_hook_count} native_inet_filter_input=${native_nft_input_active} firewalld_nft_backend=${firewalld_nft_backend_active} restrictive_raw_iptables_with_firewalld=${firewalld_raw_iptables_restrictive}"
+	active_frontends=$((firewalld_active + ufw_active + awall_active))
+	if [ "${active_frontends}" -gt 1 ]; then
+		log_line WARN "multiple firewall frontends are active (firewalld=${firewalld_active} ufw=${ufw_active} awall=${awall_active}); automatic changes are unsafe"
+		firewall_rule_warning "multiple firewall managers"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	independent_firewall_conflict=0
+	if [ "${firewalld_active}" -eq 1 ] && { [ "${iptables_service_active}" -eq 1 ] || [ "${nftables_service_active}" -eq 1 ]; }; then
+		independent_firewall_conflict=1
+	fi
+	if [ "${firewalld_active}" -eq 1 ]; then
+		if [ "${nft_live_audit_failed}" -eq 1 ] || [ "${native_nft_input_active}" -eq 1 ] || \
+			[ "${firewalld_raw_iptables_restrictive}" -eq 1 ] || \
+			{ [ "${firewalld_nft_backend_active}" -eq 1 ] && [ "${nft_live_input_hook_count}" -ne 1 ]; } || \
+			{ [ "${firewalld_nft_backend_active}" -eq 0 ] && [ "${nft_live_input_hook_count}" -ne 0 ]; }; then
+			independent_firewall_conflict=1
+		fi
+	fi
+	if { [ "${ufw_active}" -eq 1 ] || [ "${awall_active}" -eq 1 ]; } && [ "${nftables_service_active}" -eq 1 ]; then
+		independent_firewall_conflict=1
+	fi
+	if { [ "${ufw_active}" -eq 1 ] || [ "${awall_active}" -eq 1 ]; } && \
+		{ [ "${nft_live_audit_failed}" -eq 1 ] || [ "${nft_live_input_hook_count}" -ne "${iptables_nft_input_hook_count}" ]; }; then
+		independent_firewall_conflict=1
+	fi
+	if [ "${independent_firewall_conflict}" -eq 1 ]; then
+		log_line WARN "multiple independent firewall owners are active (firewalld=${firewalld_active} ufw=${ufw_active} awall=${awall_active} iptables_service=${iptables_service_active} nftables_service=${nftables_service_active} nft_input_hooks=${nft_live_input_hook_count} iptables_nft_owned_hooks=${iptables_nft_input_hook_count} native_inet_filter_input=${native_nft_input_active} restrictive_raw_iptables=${firewalld_raw_iptables_restrictive}); one backend allow rule cannot prove reachability across all INPUT hooks"
+		firewall_rule_warning "multiple independent firewall owners"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	if [ "${firewalld_active}" -eq 1 ]; then
+		if ! configure_firewalld; then
+			log_line WARN "firewalld access was not changed; inspect ${INSTALL_LOG}"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+		fi
+		return 0
+	fi
+	if [ "${ufw_active}" -eq 1 ]; then
+		if ! configure_ufw; then
+			log_line WARN "UFW access was not changed; inspect ${INSTALL_LOG}"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+		fi
+		return 0
+	fi
+	if [ "${awall_active}" -eq 1 ]; then
+		firewall_rule_warning "awall"
+		log_line WARN "awall policies are topology-specific; add a trusted-zone ${WEB_PORT}/tcp service rule and run 'awall activate' manually"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	if [ "${iptables_service_active}" -eq 1 ] && [ "${nftables_service_active}" -eq 1 ]; then
+		log_line WARN "both iptables and nftables OpenRC services are started; refusing to guess which service owns the INPUT firewall"
+		firewall_rule_warning "simultaneous iptables and nftables services"
+		[ "${FIREWALL_MODE}" = "open" ] && return 1
+		return 0
+	fi
+	if [ "${iptables_service_active}" -eq 1 ]; then
+		if command -v nft >/dev/null 2>&1 && nft list chain inet filter input >/dev/null 2>&1; then
+			log_line WARN "iptables OpenRC is active alongside a native inet/filter/input chain; refusing to modify a mixed runtime ruleset"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+		if ! is_ipv4_literal "${WEB_HOST_LOWER}"; then
+			log_line WARN "raw iptables only covers IPv4, but WebUI host=${WEB_HOST}; automatic access cannot be confirmed"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+		configure_standard_iptables
+		iptables_config_rc=$?
+		if [ "${iptables_config_rc}" -eq 0 ]; then
+			return 0
+		fi
+		if [ "${iptables_config_rc}" -ne 2 ]; then
+			log_line WARN "iptables access was not changed; inspect ${INSTALL_LOG}"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+	fi
+	if command -v nft >/dev/null 2>&1; then
+		nft_ruleset_file="${WORK_DIR}/nft-ruleset-detection"
+		nft list ruleset >"${nft_ruleset_file}" 2>/dev/null || true
+		if [ ! -s "${nft_ruleset_file}" ] && [ "${nftables_service_active}" -eq 1 ]; then
+			log_line WARN "nftables OpenRC reports started but the live ruleset is empty; the next restart may restore a restrictive persistent policy"
+			firewall_rule_warning "started nftables service with an empty live ruleset"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+		if [ -s "${nft_ruleset_file}" ]; then
+			configure_standard_nftables
+			nft_config_rc=$?
+			if [ "${nft_config_rc}" -eq 0 ]; then
+				return 0
+			fi
+			if [ "${nft_config_rc}" -ne 2 ]; then
+				log_line WARN "nftables access was not changed; inspect ${INSTALL_LOG}"
+				[ "${FIREWALL_MODE}" = "open" ] && return 1
+				return 0
+			fi
+			firewall_rule_warning "custom nftables ruleset"
+			log_line WARN "the active nftables ruleset has no standard inet/filter/input chain; manual review is required"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+	fi
+	if command -v iptables >/dev/null 2>&1; then
+		if ! is_ipv4_literal "${WEB_HOST_LOWER}"; then
+			log_line WARN "raw iptables only covers IPv4, but WebUI host=${WEB_HOST}; automatic access cannot be confirmed"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+		configure_standard_iptables
+		iptables_config_rc=$?
+		if [ "${iptables_config_rc}" -eq 0 ]; then
+			return 0
+		fi
+		if [ "${iptables_config_rc}" -ne 2 ]; then
+			log_line WARN "iptables access was not changed; inspect ${INSTALL_LOG}"
+			[ "${FIREWALL_MODE}" = "open" ] && return 1
+			return 0
+		fi
+	fi
+	log_line INFO "no active host INPUT firewall was detected; no local ${WEB_PORT}/tcp rule was added"
+	log_line WARN "cloud security groups, upstream routers and carrier networks are outside this installer and may still block remote access"
+	return 0
+}
+
 safe_remove_work_dir() {
 	if [ -n "${WORK_DIR}" ]; then
 		case "${WORK_DIR}" in
@@ -300,6 +1577,23 @@ collect_diagnostics() {
 		ps -o pid,user,group,comm 2>&1 | grep -E '[w]wan-proxy|[s]upervise-daemon' || true
 		echo "--- listening sockets ---"
 		netstat -lntup 2>&1 || true
+		echo "--- host firewall ---"
+		if command -v firewall-cmd >/dev/null 2>&1; then
+			firewall-cmd --state 2>&1 || true
+			firewall-cmd --list-all 2>&1 || true
+		fi
+		if command -v ufw >/dev/null 2>&1; then
+			LC_ALL=C ufw status verbose 2>&1 || true
+		fi
+		if command -v awall >/dev/null 2>&1; then
+			awall list --all 2>&1 || true
+		fi
+		if command -v nft >/dev/null 2>&1; then
+			nft -a list ruleset 2>&1 | head -n 500 || true
+		fi
+		if command -v iptables >/dev/null 2>&1; then
+			iptables -S 2>&1 | head -n 500 || true
+		fi
 		echo "--- memory and filesystems ---"
 		free -m 2>&1 || true
 		df -h 2>&1 || true
@@ -317,12 +1611,12 @@ collect_diagnostics() {
 			ifconfig -a 2>&1 || true
 			route -n 2>&1 || true
 		fi
-			echo "--- recent service log ---"
-			if [ "${SERVICE_LOG_TRUSTED}" -eq 1 ]; then
-				tail -n 200 "${SERVICE_LOG}" 2>&1 || true
-			else
-				echo "skipped: service log path has not passed trust checks"
-			fi
+		echo "--- recent service log ---"
+		if [ "${SERVICE_LOG_TRUSTED}" -eq 1 ]; then
+			tail -n 200 "${SERVICE_LOG}" 2>&1 || true
+		else
+			echo "skipped: service log path has not passed trust checks"
+		fi
 		echo "===== diagnostics end ====="
 	} >"${diagnostic_file}" 2>&1
 	append_output_to_log "diagnostics" "${diagnostic_file}"
@@ -382,6 +1676,7 @@ on_exit() {
 	exit_rc=$1
 	trap - EXIT HUP INT TERM
 	if [ "${exit_rc}" -ne 0 ] && [ "${SUCCESS}" -ne 1 ]; then
+		rollback_firewall_transaction
 		collect_diagnostics "installer exited with code ${exit_rc}"
 		rollback_installation
 	fi
@@ -443,6 +1738,10 @@ esac
 if [ "${START_TIMEOUT}" -lt 5 ] || [ "${START_TIMEOUT}" -gt 300 ]; then
 	fatal "--start-timeout must be between 5 and 300 seconds"
 fi
+case "${FIREWALL_MODE}" in
+	check|open|skip) ;;
+	*) fatal "WWAN_PROXY_FIREWALL must be check, open, or skip" ;;
+esac
 if [ -n "${LOCAL_ARCHIVE}" ] && [ -z "${LOCAL_CHECKSUMS}" ]; then
 	fatal "--archive requires --checksum; unverified local packages are not installed"
 fi
@@ -916,7 +2215,7 @@ if is_true "${NO_START}"; then
 	CURRENT_STEP="complete"
 	ROLLBACK_READY=0
 	SUCCESS=1
-	log_line WARN "--no-start selected; service was not enabled or started"
+	log_line WARN "--no-start selected; service was not enabled or started, and firewall inspection or changes were deferred"
 	log_line INFO "installed version=${INSTALLED_VERSION} binary=${INSTALL_BINARY}"
 	log_line INFO "enable later: rc-update add ${SERVICE_NAME} default && rc-service ${SERVICE_NAME} start"
 	log_line INFO "complete log: ${INSTALL_LOG}"
@@ -984,11 +2283,20 @@ else
 	log_line INFO "health check passed after ${health_elapsed}s (${health_attempt} attempts): ${HEALTH_DISPLAY}"
 fi
 
+if ! configure_host_firewall; then
+	# The program and service are healthy; preserve them so the administrator can
+	# apply the logged manual rule without reinstalling, but do not report a
+	# remotely reachable installation when the requested open mode was not met.
+	ROLLBACK_READY=0
+	fatal "service installation succeeded, but remote WebUI firewall access could not be confirmed; the service was kept running and ${INSTALL_LOG} contains the required manual action"
+fi
+
 CURRENT_STEP="complete"
 ROLLBACK_READY=0
 SUCCESS=1
 log_line INFO "installation successful version=${INSTALLED_VERSION} release=${RELEASE_VERSION} architecture=${APK_ARCH}"
 log_line INFO "binary=${INSTALL_BINARY} database=${DATABASE_PATH} service_log=${SERVICE_LOG}"
+[ -n "${WEB_LISTEN:-}" ] && log_line INFO "WebUI listener=${WEB_LISTEN} remote_url=http://<Alpine-host-IP>:${WEB_PORT}"
 [ -n "${BACKUP_DIR}" ] && log_line INFO "pre-upgrade bootstrap database copy=${BACKUP_DIR}"
 log_line INFO "diagnose: rc-service ${SERVICE_NAME} diagnose"
 log_line INFO "follow logs: rc-service ${SERVICE_NAME} follow"

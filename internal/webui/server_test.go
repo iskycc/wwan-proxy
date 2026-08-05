@@ -217,3 +217,21 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 }
+
+func TestWebListenNetworkRespectsLiteralAddressFamily(t *testing.T) {
+	tests := map[string]string{
+		"0.0.0.0:9090":      "tcp4",
+		"127.0.0.1:9090":    "tcp4",
+		"[::]:9090":         "tcp6",
+		"[::1]:9090":        "tcp6",
+		"[fe80::1%lo]:9090": "tcp6",
+		"localhost:9090":    "tcp",
+		":9090":             "tcp",
+		"not-an-address":    "tcp",
+	}
+	for address, want := range tests {
+		if got := webListenNetwork(address); got != want {
+			t.Errorf("webListenNetwork(%q)=%q, want %q", address, got, want)
+		}
+	}
+}

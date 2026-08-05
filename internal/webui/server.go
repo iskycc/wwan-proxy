@@ -88,12 +88,31 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 }
 
 func (s *Server) ListenAndServe() error {
-	s.log.Info("WebUI listening", "address", s.http.Addr)
-	err := s.http.ListenAndServe()
+	network := webListenNetwork(s.http.Addr)
+	listener, err := net.Listen(network, s.http.Addr)
+	if err != nil {
+		return err
+	}
+	s.log.Info("WebUI listening", "address", s.http.Addr, "network", network)
+	err = s.http.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+func webListenNetwork(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return "tcp"
+	}
+	if strings.Contains(host, ":") {
+		return "tcp6"
+	}
+	if net.ParseIP(host) != nil {
+		return "tcp4"
+	}
+	return "tcp"
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

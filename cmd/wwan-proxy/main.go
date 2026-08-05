@@ -20,6 +20,8 @@ var version = "dev"
 func main() {
 	dbPath := flag.String("db", "wwan-proxy.db", "path to SQLite database")
 	webAddress := flag.String("web", "", "override the persisted WebUI listen address")
+	webDefault := flag.String("web-default", "", "WebUI listen address used only when SQLite has no saved value")
+	printWebListen := flag.Bool("print-web-listen", false, "print the effective WebUI listen address and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -31,7 +33,7 @@ func main() {
 	// the downstream console open to DEBUG so raising verbosity at runtime does
 	// not require rebuilding the logger or restarting the service.
 	console := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
-	st, err := store.Open(*dbPath)
+	st, err := store.OpenWithWebDefault(*dbPath, *webDefault)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open SQLite database:", err)
 		os.Exit(2)
@@ -45,6 +47,11 @@ func main() {
 	effectiveWebAddress := settings.WebListen
 	if *webAddress != "" {
 		effectiveWebAddress = *webAddress
+	}
+	if *printWebListen {
+		fmt.Println(effectiveWebAddress)
+		_ = st.Close()
+		return
 	}
 	handler, flushLogs := store.NewPersistentHandler(console, st)
 	if err := handler.SetLevel(settings.LogLevel); err != nil {
