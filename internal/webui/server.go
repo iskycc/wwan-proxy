@@ -458,16 +458,16 @@ func redactServerCredentials(configs []config.Server) []config.Server {
 }
 
 func redactServerCredential(cfg config.Server) config.Server {
-	if len(cfg.Auth.Users) == 0 {
-		return cfg
+	if len(cfg.Auth.Users) > 0 {
+		users := make(map[string]string, len(cfg.Auth.Users))
+		for user := range cfg.Auth.Users {
+			users[user] = ""
+			cfg.Auth.PasswordUnchanged = append(cfg.Auth.PasswordUnchanged, user)
+		}
+		sort.Strings(cfg.Auth.PasswordUnchanged)
+		cfg.Auth.Users = users
 	}
-	users := make(map[string]string, len(cfg.Auth.Users))
-	for user := range cfg.Auth.Users {
-		users[user] = ""
-		cfg.Auth.PasswordUnchanged = append(cfg.Auth.PasswordUnchanged, user)
-	}
-	sort.Strings(cfg.Auth.PasswordUnchanged)
-	cfg.Auth.Users = users
+	cfg.Upstream.Password = ""
 	return cfg
 }
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
