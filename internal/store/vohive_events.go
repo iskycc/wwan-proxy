@@ -44,7 +44,7 @@ func (s *Store) SaveVohiveEvent(ctx context.Context, event VohiveEvent) (int64, 
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO vohive_events (type, device_id, server_id, message, details, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		string(event.Type), event.DeviceID, event.ServerID, event.Message, string(details), event.CreatedAt,
+		string(event.Type), event.DeviceID, event.ServerID, event.Message, string(details), event.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return 0, err
@@ -87,15 +87,19 @@ func (s *Store) ListVohiveEvents(ctx context.Context, opts ListVohiveEventsOptio
 	for rows.Next() {
 		var e VohiveEvent
 		var details string
+		var createdAt string
 		var serverID sql.NullInt64
-		if err := rows.Scan(&e.ID, &e.Type, &e.DeviceID, &serverID, &e.Message, &details, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Type, &e.DeviceID, &serverID, &e.Message, &details, &createdAt); err != nil {
 			return nil, err
 		}
 		if serverID.Valid {
 			e.ServerID = &serverID.Int64
 		}
+		e.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 		if details != "" {
-			_ = json.Unmarshal([]byte(details), &e.Details)
+			if err := json.Unmarshal([]byte(details), &e.Details); err != nil {
+				return nil, fmt.Errorf("unmarshal details for event %d: %w", e.ID, err)
+			}
 		}
 		events = append(events, e)
 	}
@@ -104,7 +108,7 @@ func (s *Store) ListVohiveEvents(ctx context.Context, opts ListVohiveEventsOptio
 
 func (s *Store) PruneVohiveEvents(ctx context.Context, retention time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-retention)
-	res, err := s.db.ExecContext(ctx, "DELETE FROM vohive_events WHERE created_at < ?", cutoff)
+	res, err := s.db.ExecContext(ctx, "DELETE FROM vohive_events WHERE created_at < ?", cutoff.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}

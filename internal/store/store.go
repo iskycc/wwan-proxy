@@ -243,7 +243,7 @@ CREATE TABLE IF NOT EXISTS vohive_events (
   server_id INTEGER,
   message TEXT NOT NULL,
   details TEXT NOT NULL DEFAULT '{}',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_vohive_events_device ON vohive_events(device_id);
 CREATE INDEX IF NOT EXISTS idx_vohive_events_type ON vohive_events(type);
