@@ -418,6 +418,9 @@ func TestStatsHandlers(t *testing.T) {
 	if stats[0]["bucket"] == "" {
 		t.Fatalf("stats response missing bucket: %+v", stats[0])
 	}
+	if stats[0]["success_rate"] == nil {
+		t.Fatalf("stats response missing success_rate: %+v", stats[0])
+	}
 
 	resp, err = client.Get(ts.URL + "/api/stats/summary?server_id=" + strconv.FormatInt(cfg.ID, 10))
 	if err != nil {

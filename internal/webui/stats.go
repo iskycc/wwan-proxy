@@ -10,16 +10,17 @@ import (
 )
 
 type statsPoint struct {
-	Bucket             string `json:"bucket"`
-	UploadBytes        uint64 `json:"upload_bytes"`
-	DownloadBytes      uint64 `json:"download_bytes"`
-	TotalConnections   uint64 `json:"total_connections"`
-	ConnectionErrors   uint64 `json:"connection_errors"`
-	TotalRequests      uint64 `json:"total_requests"`
-	RequestErrors      uint64 `json:"request_errors"`
-	ActiveConnections  int64  `json:"active_connections"`
-	HeartbeatLatencyMs int64  `json:"heartbeat_latency_ms"`
-	HeartbeatHealthy   bool   `json:"heartbeat_healthy"`
+	Bucket             string  `json:"bucket"`
+	UploadBytes        uint64  `json:"upload_bytes"`
+	DownloadBytes      uint64  `json:"download_bytes"`
+	TotalConnections   uint64  `json:"total_connections"`
+	ConnectionErrors   uint64  `json:"connection_errors"`
+	TotalRequests      uint64  `json:"total_requests"`
+	RequestErrors      uint64  `json:"request_errors"`
+	ActiveConnections  int64   `json:"active_connections"`
+	HeartbeatLatencyMs int64   `json:"heartbeat_latency_ms"`
+	HeartbeatHealthy   bool    `json:"heartbeat_healthy"`
+	SuccessRate        float64 `json:"success_rate"`
 }
 
 func (s *Server) statsServers(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +64,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 			ActiveConnections:  r.ActiveConnections,
 			HeartbeatLatencyMs: r.HeartbeatLatencyMs,
 			HeartbeatHealthy:   r.HeartbeatHealthy,
+			SuccessRate:        computeSuccessRate(r.TotalConnections, r.TotalRequests, r.ConnectionErrors, r.RequestErrors),
 		}
 	}
 	writeJSON(w, http.StatusOK, points)
@@ -144,4 +146,16 @@ func parseTimeParam(value string) (time.Time, error) {
 		return time.Time{}, errors.New("invalid time format, expected RFC3339")
 	}
 	return t, nil
+}
+
+func computeSuccessRate(totalConnections, totalRequests, connectionErrors, requestErrors uint64) float64 {
+	denom := totalConnections + totalRequests
+	if denom == 0 {
+		return 1
+	}
+	numer := int64(totalConnections + totalRequests - connectionErrors - requestErrors)
+	if numer < 0 {
+		numer = 0
+	}
+	return float64(numer) / float64(denom)
 }
