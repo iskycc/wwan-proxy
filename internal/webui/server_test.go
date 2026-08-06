@@ -218,6 +218,110 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+func TestVohiveEventsAPI(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "vohive-web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := manager.New(ctx, st, logger)
+	defer mgr.Close()
+	ui := New("127.0.0.1:0", st, mgr, logger)
+	ts := httptest.NewServer(ui.http.Handler)
+	defer ts.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+
+	// Initialize admin.
+	authBody := []byte(`{"username":"administrator","password":"StrongPassword!42"}`)
+	resp, err := client.Post(ts.URL+"/api/auth/initialize", "application/json", bytes.NewReader(authBody))
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("initialize status=%v err=%v", resp.StatusCode, err)
+	}
+	_ = resp.Body.Close()
+
+	// Unauthenticated request should fail.
+	unauth := &http.Client{}
+	resp, err = unauth.Get(ts.URL + "/api/vohive/events")
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%v err=%v", resp.StatusCode, err)
+	}
+	_ = resp.Body.Close()
+
+	// Seed an event.
+	serverID := int64(42)
+	_, err = st.SaveVohiveEvent(context.Background(), store.VohiveEvent{
+		Type:      store.VohiveEventDegraded,
+		DeviceID:  "Y2",
+		ServerID:  &serverID,
+		Message:   "link down",
+		Details:   map[string]any{"signal": -90},
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// GET /api/vohive/events returns the event.
+	resp, err = client.Get(ts.URL + "/api/vohive/events")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%v err=%v", resp.StatusCode, err)
+	}
+	var events []store.VohiveEvent
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(events) != 1 || events[0].DeviceID != "Y2" || events[0].Type != store.VohiveEventDegraded {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+
+	// Filter by device.
+	resp, err = client.Get(ts.URL + "/api/vohive/events?device=Y2")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("filtered events status=%v err=%v", resp.StatusCode, err)
+	}
+	events = nil
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event for device filter, got %d", len(events))
+	}
+
+	// Filter by type.
+	resp, err = client.Get(ts.URL + "/api/vohive/events?type=degraded")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("filtered events status=%v err=%v", resp.StatusCode, err)
+	}
+	events = nil
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event for type filter, got %d", len(events))
+	}
+
+	// Overview includes vohive_events.
+	resp, err = client.Get(ts.URL + "/api/overview")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("overview status=%v err=%v", resp.StatusCode, err)
+	}
+	var overview map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if _, ok := overview["vohive_events"]; !ok {
+		t.Fatal("overview missing vohive_events")
+	}
+}
+
 func TestWebListenNetworkRespectsLiteralAddressFamily(t *testing.T) {
 	tests := map[string]string{
 		"0.0.0.0:9090":      "tcp4",

@@ -80,6 +80,7 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 	mux.HandleFunc("DELETE /api/servers/{id}", s.deleteServer)
 	mux.HandleFunc("POST /api/servers/{id}/toggle", s.toggleServer)
 	mux.HandleFunc("GET /api/logs", s.logs)
+	mux.HandleFunc("GET /api/vohive/events", s.vohiveEvents)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
 	staticFS, _ := fs.Sub(assets, "static")
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
@@ -138,6 +139,10 @@ func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load heartbeat status: %w", err)
 	}
+	vohiveEvents, err := s.store.ListVohiveEvents(ctx, store.ListVohiveEventsOptions{Limit: 10})
+	if err != nil {
+		return nil, fmt.Errorf("load vohive events: %w", err)
+	}
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	liveHeapSample := []runtimemetrics.Sample{{Name: "/gc/heap/live:bytes"}}
@@ -154,6 +159,7 @@ func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
 	return map[string]any{
 		"service_instance_id": s.started.UTC().Format(time.RFC3339Nano), "sampled_at": sampledAt,
 		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": redactServerCredentials(configs), "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
+		"vohive_events": vohiveEvents,
 		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC, "websocket_clients": s.websocketClients.Load()},
 	}, nil
 }
