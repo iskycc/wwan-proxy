@@ -196,7 +196,7 @@ func TestUDPAssociationLimitIsReleasedWithControl(t *testing.T) {
 	}
 }
 
-func TestUDPRelayRejectsWrongSourcePortAndFragments(t *testing.T) {
+func TestUDPRelayPinsSourceAndRejectsWrongSourcePortAndFragments(t *testing.T) {
 	target, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -217,14 +217,32 @@ func TestUDPRelayRejectsWrongSourcePortAndFragments(t *testing.T) {
 	control, done := runHandler(t, srv)
 	defer control.Close()
 	greet(t, control)
-	request(t, control, cmdUDPAssociate, net.IPv4zero, client.LocalAddr().(*net.UDPAddr).Port)
+	request(t, control, cmdUDPAssociate, net.IPv4zero, 0)
 	relay := readSuccessReply(t, control)
-	packet := udpTestPacket(target.LocalAddr().(*net.UDPAddr), []byte("must-not-pass"))
-	if _, err := intruder.WriteToUDP(packet, relay); err != nil {
+
+	packet := udpTestPacket(target.LocalAddr().(*net.UDPAddr), []byte("allowed"))
+	if _, err := client.WriteToUDP(packet, relay); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the first datagram to pin the client source and drain it at the target.
+	buf := make([]byte, 128)
+	_ = target.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err := target.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "allowed" {
+		t.Fatalf("target payload=%q", buf[:n])
+	}
+
+	// An intruder sending to the same relay must be ignored after pinning.
+	intruderPacket := udpTestPacket(target.LocalAddr().(*net.UDPAddr), []byte("must-not-pass"))
+	if _, err := intruder.WriteToUDP(intruderPacket, relay); err != nil {
 		t.Fatal(err)
 	}
 	waitForSOCKSMetric(t, srv, func(m MetricsSnapshot) bool { return m.UDPClientSourceDrops == 1 })
 
+	// Fragments from the pinned client are also rejected.
 	fragment := append([]byte(nil), packet...)
 	fragment[2] = 1
 	if _, err := client.WriteToUDP(fragment, relay); err != nil {
@@ -233,23 +251,10 @@ func TestUDPRelayRejectsWrongSourcePortAndFragments(t *testing.T) {
 	waitForSOCKSMetric(t, srv, func(m MetricsSnapshot) bool { return m.UDPFragmentDrops == 1 })
 
 	_ = target.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
-	buf := make([]byte, 128)
 	if _, _, err := target.ReadFromUDP(buf); err == nil {
 		t.Fatal("rejected source or fragmented datagram reached target")
 	} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
 		t.Fatal(err)
-	}
-
-	if _, err := client.WriteToUDP(udpTestPacket(target.LocalAddr().(*net.UDPAddr), []byte("allowed")), relay); err != nil {
-		t.Fatal(err)
-	}
-	_ = target.SetReadDeadline(time.Now().Add(time.Second))
-	n, _, err := target.ReadFromUDP(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buf[:n]) != "allowed" {
-		t.Fatalf("target payload=%q", buf[:n])
 	}
 	_ = control.Close()
 	select {
@@ -828,7 +833,7 @@ func TestUDPAssociationCancellationClosesSocketsBeforeWaitingForWrites(t *testin
 	defer srv.Close()
 	writeStarted := make(chan struct{})
 	assoc := &udpAssociation{
-		server: srv, client: relay, peerIP: cloneUDPAddr(client.LocalAddr().(*net.UDPAddr)).IP,
+		server: srv, client: relay,
 		targetTTL: time.Minute, allowedTargets: make(map[netip.AddrPort]*udpTargetGrant),
 		writeTarget: func(conn *net.UDPConn, _ []byte, _ *net.UDPAddr) (int, error) {
 			close(writeStarted)
@@ -984,16 +989,86 @@ func TestUDPAddrPortNormalizesIPv4MappedAddress(t *testing.T) {
 	}
 }
 
-func TestUDPAssociationPinsClientIPAndPort(t *testing.T) {
-	assoc := &udpAssociation{peerIP: net.IPv4(127, 0, 0, 1)}
-	if assoc.acceptClient(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 41000}) {
-		t.Fatal("association accepted a UDP datagram from a different client IP")
-	}
+func TestUDPAssociationPinsFirstClientDatagramSource(t *testing.T) {
+	assoc := &udpAssociation{}
+	// The first datagram seen on the relay sets the pinned client endpoint.
 	if !assoc.acceptClient(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 41000}) {
-		t.Fatal("association rejected its first matching client endpoint")
+		t.Fatal("association rejected its first client endpoint")
 	}
+	// Same source is accepted.
+	if !assoc.acceptClient(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 41000}) {
+		t.Fatal("association rejected a repeat datagram from the pinned source")
+	}
+	// A different source port or IP is rejected after pinning.
 	if assoc.acceptClient(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 41001}) {
 		t.Fatal("association accepted a different client source port after pinning")
+	}
+	if assoc.acceptClient(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 41000}) {
+		t.Fatal("association accepted a different client source IP after pinning")
+	}
+}
+
+func TestUDPAssociateAcceptsMismatchedClientIPAndPinsFirstDatagramSource(t *testing.T) {
+	target, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	srv := newUDPTestServer(config.UDP{
+		Enabled: true, BindIP: "127.0.0.1", Advertise: "auto",
+		IdleTimeout: config.Duration(3 * time.Second),
+	})
+	control, done := runHandler(t, srv)
+	defer control.Close()
+	greet(t, control)
+
+	// Request UDP ASSOCIATE with a client IP that does NOT match the TCP peer
+	// (simulates WiFi Calling / iCloud Private Relay behind NAT).
+	request(t, control, cmdUDPAssociate, net.IPv4(203, 0, 113, 1), 0)
+	relay := readSuccessReply(t, control)
+
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	packet := udpTestPacket(target.LocalAddr().(*net.UDPAddr), []byte("wifi-calling"))
+	if _, err := client.WriteToUDP(packet, relay); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 128)
+	_ = target.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err := target.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("target did not receive relayed datagram: %v", err)
+	}
+	// The relay strips the SOCKS5 UDP header before forwarding to the target.
+	if string(buf[:n]) != "wifi-calling" {
+		t.Fatalf("target payload=%q, want wifi-calling", string(buf[:n]))
+	}
+
+	// An intruder sending to the same relay must be ignored.
+	intruder, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer intruder.Close()
+	if _, err := intruder.WriteToUDP(packet, relay); err != nil {
+		t.Fatal(err)
+	}
+	_ = target.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, _, err := target.ReadFromUDP(buf); err == nil {
+		t.Fatal("intruder datagram was relayed after source was pinned")
+	}
+
+	_ = control.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("association did not stop")
 	}
 }
 

@@ -48,8 +48,6 @@ type sourceAdvertiseEntry struct {
 type udpAssociation struct {
 	server    *Server
 	client    *net.UDPConn
-	peerIP    net.IP
-	peerPort  int
 	targetTTL time.Duration
 
 	mu             sync.RWMutex
@@ -152,8 +150,6 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 	assoc := &udpAssociation{
 		server:         s,
 		client:         clientConn,
-		peerIP:         append(net.IP(nil), remoteTCP.IP...),
-		peerPort:       int(requested.Port),
 		targetTTL:      targetTTL,
 		allowedTargets: make(map[netip.AddrPort]*udpTargetGrant),
 	}
@@ -179,10 +175,16 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 func (s *Server) validateUDPClient(parent context.Context, requested address, peerIP net.IP) error {
 	requestedIP := net.ParseIP(requested.Host)
 	if requestedIP != nil {
-		if requestedIP.IsUnspecified() || requestedIP.Equal(peerIP) {
+		// RFC 1928 says the client MAY put the address/port it expects to use
+		// for UDP datagrams in the UDP ASSOCIATE request. In NAT environments
+		// (e.g. WiFi Calling, iCloud Private Relay) this advertised address
+		// often differs from the TCP control connection's peer IP. We accept
+		// any valid unicast address (or the wildcard) here; the actual source
+		// is pinned when the first UDP datagram arrives.
+		if requestedIP.IsUnspecified() || usableUDPReplyIP(requestedIP) {
 			return nil
 		}
-		return fmt.Errorf("UDP requested client IP %s does not match TCP peer %s", requestedIP, peerIP)
+		return fmt.Errorf("UDP requested client IP %s is not a usable unicast address", requestedIP)
 	}
 	ctx, cancel := context.WithTimeout(parent, s.resolutionTimeout())
 	defer cancel()
@@ -201,11 +203,11 @@ func (s *Server) validateUDPClient(parent context.Context, requested address, pe
 		return fmt.Errorf("resolve UDP requested client host %q: %w", requested.Host, err)
 	}
 	for _, ip := range ips {
-		if ip.IP.Equal(peerIP) {
+		if usableUDPReplyIP(ip.IP) {
 			return nil
 		}
 	}
-	return fmt.Errorf("UDP requested client host %q does not resolve to TCP peer %s", requested.Host, peerIP)
+	return fmt.Errorf("UDP requested client host %q did not resolve to a usable unicast address", requested.Host)
 }
 
 func (s *Server) udpAdvertiseIP(controlLocal, controlRemote net.IP) (net.IP, error) {
@@ -584,21 +586,20 @@ func (a *udpAssociation) writeToTarget(conn *net.UDPConn, payload []byte, target
 }
 
 func (a *udpAssociation) acceptClient(from *net.UDPAddr) bool {
-	if from == nil || !from.IP.Equal(a.peerIP) {
+	if from == nil {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.peerPort != 0 && from.Port != a.peerPort {
-		return false
-	}
 	if a.clientAt == nil {
+		// Pin the association to the first UDP source we see. This is both
+		// more compatible with NAT (where the advertised client IP may differ
+		// from the actual UDP source) and secure: an attacker would have to
+		// race the legitimate client for the first datagram.
 		a.clientAt = cloneUDPAddr(from)
-		if a.peerPort == 0 {
-			a.peerPort = from.Port
-		}
+		return true
 	}
-	return from.Port == a.clientAt.Port && from.Zone == a.clientAt.Zone
+	return from.IP.Equal(a.clientAt.IP) && from.Port == a.clientAt.Port && from.Zone == a.clientAt.Zone
 }
 
 func (a *udpAssociation) resolve(parent context.Context, dst address) ([]*net.UDPAddr, error) {
