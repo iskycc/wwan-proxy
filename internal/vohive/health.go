@@ -22,6 +22,10 @@ type HealthResponse struct {
 }
 
 func (c *Client) GetHealth(ctx context.Context) (*HealthResponse, error) {
+	return c.getHealth(ctx, true)
+}
+
+func (c *Client) getHealth(ctx context.Context, allowRetry bool) (*HealthResponse, error) {
 	if err := c.ensureToken(ctx); err != nil {
 		return nil, fmt.Errorf("vohive authenticate: %w", err)
 	}
@@ -43,16 +47,16 @@ func (c *Client) GetHealth(ctx context.Context) (*HealthResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	// Single 401 retry, mirroring requestWithRetry.
-	if resp.StatusCode == http.StatusUnauthorized {
+	// If the token was rejected, clear it and retry once after re-authenticating.
+	if resp.StatusCode == http.StatusUnauthorized && allowRetry {
 		c.mu.Lock()
 		c.token = ""
 		c.expiresAt = zeroTime
 		c.mu.Unlock()
-		return c.GetHealth(ctx)
+		return c.getHealth(ctx, false)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, err
 	}

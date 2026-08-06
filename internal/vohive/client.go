@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
 
 var zeroTime time.Time
+
+const maxResponseBytes = 64 * 1024
 
 type Client struct {
 	baseURL  string
@@ -57,7 +60,17 @@ func (c *Client) RestartDevice(ctx context.Context, deviceID string) (NetworkSta
 	if _, err := c.patchEnabled(ctx, deviceID, false); err != nil {
 		return NetworkStatus{}, fmt.Errorf("disable device network: %w", err)
 	}
-	return c.patchEnabled(ctx, deviceID, true)
+
+	status, err := c.patchEnabled(ctx, deviceID, true)
+	if err != nil {
+		// Best-effort: try to leave the device enabled even though the
+		// restart's enable step failed.
+		if _, reenableErr := c.patchEnabled(ctx, deviceID, true); reenableErr != nil {
+			return NetworkStatus{}, fmt.Errorf("enable device network: %w (re-enable also failed: %v)", err, reenableErr)
+		}
+		return NetworkStatus{}, fmt.Errorf("enable device network: %w", err)
+	}
+	return status, nil
 }
 
 func (c *Client) GetNetworkStatus(ctx context.Context, deviceID string) (NetworkStatus, error) {
@@ -65,25 +78,29 @@ func (c *Client) GetNetworkStatus(ctx context.Context, deviceID string) (Network
 }
 
 func (c *Client) patchEnabled(ctx context.Context, deviceID string, enabled bool) (NetworkStatus, error) {
-	body, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	body, err := json.Marshal(map[string]bool{"enabled": enabled})
+	if err != nil {
+		return NetworkStatus{}, err
+	}
 	return c.request(ctx, http.MethodPatch, deviceNetworkPath(deviceID), body)
 }
 
 func deviceNetworkPath(deviceID string) string {
-	return "/api/devices/" + deviceID + "/network"
+	return "/api/devices/" + url.PathEscape(deviceID) + "/network"
 }
 
 func (c *Client) ensureToken(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Allow a small margin before the recorded expiry to avoid using a token
-	// that is about to be rejected.
-	if c.token != "" && time.Until(c.expiresAt) > 10*time.Second {
+	needsLogin := c.token == "" || time.Until(c.expiresAt) <= 10*time.Second
+	c.mu.Unlock()
+	if !needsLogin {
 		return nil
 	}
 
-	body, _ := json.Marshal(map[string]string{"username": c.username, "password": c.password})
+	body, err := json.Marshal(map[string]string{"username": c.username, "password": c.password})
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/auth/login", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -97,7 +114,7 @@ func (c *Client) ensureToken(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return err
 	}
@@ -112,6 +129,8 @@ func (c *Client) ensureToken(ctx context.Context) error {
 	if login.Token == "" {
 		return fmt.Errorf("vohive login response did not contain a token")
 	}
+
+	c.mu.Lock()
 	c.token = login.Token
 	if !login.ExpiresAt.IsZero() {
 		c.expiresAt = login.ExpiresAt
@@ -119,6 +138,7 @@ func (c *Client) ensureToken(ctx context.Context) error {
 		// Fallback: assume a 24-hour token if the server omits expiry.
 		c.expiresAt = time.Now().Add(24 * time.Hour)
 	}
+	c.mu.Unlock()
 	return nil
 }
 
@@ -159,12 +179,12 @@ func (c *Client) requestWithRetry(ctx context.Context, method, path string, body
 	if resp.StatusCode == http.StatusUnauthorized && allowRetry {
 		c.mu.Lock()
 		c.token = ""
-		c.expiresAt = time.Time{}
+		c.expiresAt = zeroTime
 		c.mu.Unlock()
 		return c.requestWithRetry(ctx, method, path, body, false)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return NetworkStatus{}, err
 	}
