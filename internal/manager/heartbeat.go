@@ -154,7 +154,10 @@ func (m *Manager) heartbeatCheckResult(inst *instance, probe heartbeatProbeResul
 		}
 		inst.heartbeatPreviousFailureSignature = signature
 		m.maybeTriggerVohiveRecovery(inst, inst.heartbeatConsecutiveFailures)
-		m.enterVohiveFastMode()
+		firstFailure := previousHealthy == nil || *previousHealthy
+		if firstFailure {
+			m.enterVohiveFastMode()
+		}
 	} else if previousHealthy != nil && !*previousHealthy {
 		inst.clearHeartbeatError()
 		m.log.Warn("egress heartbeat recovered", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo, "failed_checks", inst.heartbeatConsecutiveFailures, "failure_duration", time.Since(inst.heartbeatFirstFailure).Round(time.Millisecond))

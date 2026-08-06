@@ -163,6 +163,36 @@ func TestVohiveRecoveryFullFlowRestartsDeviceAndReloadsInstance(t *testing.T) {
 
 	reloaded.Wait()
 
+	// Verify recovery events were persisted.
+	events, err := st.ListVohiveEvents(context.Background(), store.ListVohiveEventsOptions{DeviceID: cfg.VohiveDeviceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startedCount, succeededCount int
+	for _, e := range events {
+		if e.DeviceID != cfg.VohiveDeviceID {
+			continue
+		}
+		switch e.Type {
+		case store.VohiveEventRecoveryStarted:
+			startedCount++
+		case store.VohiveEventRecoverySucceeded:
+			succeededCount++
+			if e.ServerID == nil || *e.ServerID != cfg.ID {
+				t.Fatalf("recovery_succeeded event has wrong server_id: got %v, want %d", e.ServerID, cfg.ID)
+			}
+			if e.DeviceID != cfg.VohiveDeviceID {
+				t.Fatalf("recovery_succeeded event has wrong device_id: got %q, want %q", e.DeviceID, cfg.VohiveDeviceID)
+			}
+		}
+	}
+	if startedCount != 1 {
+		t.Fatalf("expected 1 recovery_started event, got %d", startedCount)
+	}
+	if succeededCount != 1 {
+		t.Fatalf("expected 1 recovery_succeeded event, got %d", succeededCount)
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -230,6 +260,46 @@ func TestVohiveRecoveryRetriesStatusUntilPublicIP(t *testing.T) {
 
 	if callCount != 3 {
 		t.Fatalf("expected 3 status checks, got %d", callCount)
+	}
+}
+
+func TestVohiveRecoveryFailureRecordsRecoveryFailedEvent(t *testing.T) {
+	m, st, cfg, cleanup := newVohiveTestManager(t)
+	defer cleanup()
+	defer st.Close()
+	defer m.Close()
+
+	inst := m.instances[cfg.ID]
+	if inst == nil {
+		t.Fatal("instance not created")
+	}
+	inst.mu.Lock()
+	inst.vohiveInProgress = false
+	inst.lastVohiveAttempt = time.Time{}
+	inst.mu.Unlock()
+
+	m.runVohiveRecovery(context.Background(), inst, cfg.VohiveDeviceID)
+
+	events, err := st.ListVohiveEvents(context.Background(), store.ListVohiveEventsOptions{DeviceID: cfg.VohiveDeviceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started, failed int
+	for _, e := range events {
+		if e.ServerID != nil && *e.ServerID == cfg.ID && e.DeviceID == cfg.VohiveDeviceID {
+			switch e.Type {
+			case store.VohiveEventRecoveryStarted:
+				started++
+			case store.VohiveEventRecoveryFailed:
+				failed++
+			}
+		}
+	}
+	if started != 1 {
+		t.Fatalf("expected 1 recovery_started event, got %d", started)
+	}
+	if failed != 1 {
+		t.Fatalf("expected 1 recovery_failed event, got %d", failed)
 	}
 }
 

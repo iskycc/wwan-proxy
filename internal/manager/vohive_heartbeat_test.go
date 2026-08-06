@@ -61,22 +61,46 @@ func TestVohiveHeartbeatRecordsDegradedAndRecovered(t *testing.T) {
 	}
 }
 
-func TestVohiveHeartbeatFastMode(t *testing.T) {
-	m, st, _, cleanup := newVohiveTestManagerWithURL(t, "http://127.0.0.1:1")
+func TestVohiveHeartbeatFastModeRefCount(t *testing.T) {
+	m, st, _, cleanup := newVohiveTestManager(t)
 	defer cleanup()
 	defer st.Close()
 	defer m.Close()
 
 	m.vohiveHealth = &vohiveHealthState{}
-	m.setVohiveFastMode(true)
+
+	m.enterVohiveFastMode()
+	m.enterVohiveFastMode()
 	if !m.vohiveHealth.fastMode() {
-		t.Fatal("expected fastMode to be true after setVohiveFastMode(true)")
+		t.Fatal("expected fastMode true after enters")
 	}
+	m.vohiveHealth.mu.RLock()
+	if m.vohiveHealth.fastRefCount != 2 {
+		t.Fatalf("expected fastRefCount=2, got %d", m.vohiveHealth.fastRefCount)
+	}
+	m.vohiveHealth.mu.RUnlock()
+
+	m.leaveVohiveFastMode()
+	if !m.vohiveHealth.fastMode() {
+		t.Fatal("expected fastMode still true after one leave with refcount=1")
+	}
+
+	m.leaveVohiveFastMode()
+	if !m.vohiveHealth.fastMode() {
+		t.Fatal("expected fastMode true immediately after last leave due to 30s grace")
+	}
+	m.vohiveHealth.mu.RLock()
+	if m.vohiveHealth.fastRefCount != 0 {
+		t.Fatalf("expected fastRefCount=0, got %d", m.vohiveHealth.fastRefCount)
+	}
+	m.vohiveHealth.mu.RUnlock()
+
+	// Expire the grace period.
 	m.vohiveHealth.mu.Lock()
 	m.vohiveHealth.fastUntil = time.Now().Add(-time.Millisecond)
 	m.vohiveHealth.mu.Unlock()
 	if m.vohiveHealth.fastMode() {
-		t.Fatal("expected fastMode to be false after fastUntil expired")
+		t.Fatal("expected fastMode false after grace period expired")
 	}
 }
 
