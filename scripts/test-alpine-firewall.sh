@@ -400,17 +400,24 @@ docker run --detach --privileged \
   --volume "${repo_root}:/workspace:ro" \
   alpine:3.23 \
   sh -ec '
-    for apk_attempt in $(seq 1 5); do
+    apk_last_status=1
+    for apk_attempt in $(seq 1 10); do
       if apk add --no-cache openrc ufw nftables >/tmp/bootstrap.log 2>&1; then
+        apk_last_status=0
         break
       fi
       echo "apk attempt ${apk_attempt} failed, retrying..." >>/tmp/bootstrap.log
-      sleep 3
+      sleep 5
     done
+    if [[ ${apk_last_status} -ne 0 ]]; then
+      echo "apk add openrc ufw nftables failed after 10 attempts" >&2
+      cat /tmp/bootstrap.log >&2
+      exit 1
+    fi
     # Alpine package extraction is normally synchronous, but CI overlayfs mirrors
     # occasionally leave the ufw binary invisible for a short moment; give it a
     # chance to settle before failing the whole job.
-    for verify_attempt in $(seq 1 15); do
+    for verify_attempt in $(seq 1 30); do
       if test -x /usr/sbin/ufw; then
         break
       fi
