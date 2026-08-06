@@ -62,26 +62,32 @@ func (m *Manager) runVohiveRecovery(ctx context.Context, inst *instance, deviceI
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	m.recordVohiveEvent(ctx, store.VohiveEventRecoveryStarted, deviceID, &inst.cfg.ID, fmt.Sprintf("recovery started for server %s", inst.cfg.Name), nil)
+
 	var status vohive.NetworkStatus
 	status, err := inst.vohiveClient.RestartDevice(ctx, deviceID)
 	if err != nil {
 		m.log.Error("vohive device restart failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+		m.recordVohiveEvent(ctx, store.VohiveEventRecoveryFailed, deviceID, &inst.cfg.ID, fmt.Sprintf("restart failed: %v", err), map[string]any{"error": err.Error()})
 		return err
 	}
 	if !status.NetworkConnected {
 		m.log.Error("vohive device restart did not restore network connectivity", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "status", status.Status)
+		m.recordVohiveEvent(ctx, store.VohiveEventRecoveryFailed, deviceID, &inst.cfg.ID, "device restart did not restore network connectivity", map[string]any{"status": status.Status})
 		return nil
 	}
 
 	m.log.Info("vohive device network restarted, reloading instance", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "private_ip", status.PrivateIP)
 	if err := m.vohiveReload(ctx, inst.cfg.ID); err != nil {
 		m.log.Error("failed to reload instance after vohive recovery", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+		m.recordVohiveEvent(ctx, store.VohiveEventRecoveryFailed, deviceID, &inst.cfg.ID, fmt.Sprintf("reload failed: %v", err), map[string]any{"error": err.Error()})
 		return err
 	}
 
 	if m.vohivePostRestartSleep != nil {
 		if err := m.vohivePostRestartSleep(ctx); err != nil {
 			m.log.Warn("vohive recovery aborted during post-restart wait", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+			m.recordVohiveEvent(ctx, store.VohiveEventRecoveryFailed, deviceID, &inst.cfg.ID, fmt.Sprintf("post-restart wait aborted: %v", err), map[string]any{"error": err.Error()})
 			return err
 		}
 	}
@@ -92,6 +98,7 @@ func (m *Manager) runVohiveRecovery(ctx context.Context, inst *instance, deviceI
 			m.log.Warn("vohive status check failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "attempt", attempt+1, "error", err)
 		} else if status.PublicIP != "" {
 			m.log.Info("vohive recovery confirmed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "public_ip", status.PublicIP)
+			m.recordVohiveEvent(ctx, store.VohiveEventRecoverySucceeded, deviceID, &inst.cfg.ID, fmt.Sprintf("recovery confirmed for server %s", inst.cfg.Name), map[string]any{"public_ip": status.PublicIP})
 			return nil
 		} else {
 			m.log.Warn("vohive status check returned empty public_ip", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "attempt", attempt+1)
@@ -99,11 +106,13 @@ func (m *Manager) runVohiveRecovery(ctx context.Context, inst *instance, deviceI
 		if attempt < 2 && m.vohiveStatusRetryDelay != nil {
 			if err := m.vohiveStatusRetryDelay(ctx); err != nil {
 				m.log.Warn("vohive recovery aborted during status retry wait", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+				m.recordVohiveEvent(ctx, store.VohiveEventRecoveryFailed, deviceID, &inst.cfg.ID, fmt.Sprintf("status retry wait aborted: %v", err), map[string]any{"error": err.Error()})
 				return err
 			}
 		}
 	}
 	m.log.Warn("vohive recovery completed but public_ip was not confirmed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID)
+	m.recordVohiveEvent(ctx, store.VohiveEventRecoveryFailed, deviceID, &inst.cfg.ID, "public_ip was not confirmed after restart", nil)
 	return nil
 }
 

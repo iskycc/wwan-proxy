@@ -34,6 +34,11 @@ type Manager struct {
 	vohiveReload           func(context.Context, int64) error
 	vohivePostRestartSleep func(context.Context) error
 	vohiveStatusRetryDelay func(context.Context) error
+
+	vohiveHealth          *vohiveHealthState
+	systemVohiveSettings  config.VohiveSettings
+	vohiveHeartbeatCancel context.CancelFunc
+	vohiveHeartbeatWG     sync.WaitGroup
 }
 
 type instance struct {
@@ -140,6 +145,14 @@ func (m *Manager) StartAll(ctx context.Context) error {
 		if cfg.Enabled {
 			m.start(cfg)
 		}
+	}
+	if settings, err := m.store.SystemSettings(ctx); err == nil {
+		m.mu.Lock()
+		m.systemVohiveSettings = settings.Vohive
+		m.mu.Unlock()
+		m.startVohiveHeartbeat(settings.Vohive)
+	} else {
+		m.log.Error("failed to load system settings for vohive heartbeat", "error", err)
 	}
 	return nil
 }
@@ -301,6 +314,10 @@ func (m *Manager) Close() {
 		m.shutdownInstance(inst)
 	}
 	m.drainWG.Wait()
+	if m.vohiveHeartbeatCancel != nil {
+		m.vohiveHeartbeatCancel()
+	}
+	m.vohiveHeartbeatWG.Wait()
 }
 
 func (m *Manager) start(cfg config.Server) {
