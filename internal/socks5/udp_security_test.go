@@ -481,7 +481,7 @@ func TestUDPAdvertiseAutoPrefersPublicInterfaceIP(t *testing.T) {
 	}
 }
 
-func TestUDPAdvertiseAutoFailsWithoutPublicInterfaceIP(t *testing.T) {
+func TestUDPAdvertiseAutoFallsBackToControlLocalWithoutPublicInterfaceIP(t *testing.T) {
 	old := publicInterfaceIPFunc
 	publicInterfaceIPFunc = func(ipv4 bool) (net.IP, error) {
 		return nil, fmt.Errorf("no public IPv4 address found")
@@ -490,8 +490,9 @@ func TestUDPAdvertiseAutoFailsWithoutPublicInterfaceIP(t *testing.T) {
 
 	srv := newUDPTestServer(config.UDP{BindIP: "0.0.0.0", Advertise: "auto"})
 	defer srv.Close()
-	if got, err := srv.udpAdvertiseIP(net.IPv4(10, 0, 0, 1)); err == nil {
-		t.Fatalf("udpAdvertiseIP()=%v, want error when no public interface IP exists", got)
+	got, err := srv.udpAdvertiseIP(net.IPv4(10, 0, 0, 1))
+	if err != nil || !got.Equal(net.IPv4(10, 0, 0, 1)) {
+		t.Fatalf("advertise IP=%v err=%v, want control local IP 10.0.0.1", got, err)
 	}
 }
 

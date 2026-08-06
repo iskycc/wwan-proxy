@@ -238,11 +238,12 @@ func (s *Server) udpAdvertiseIP(controlLocal net.IP) (net.IP, error) {
 		if findErr == nil {
 			return publicIP, nil
 		}
-		family := "IPv4"
-		if bindIP.To4() == nil {
-			family = "IPv6"
-		}
-		return nil, fmt.Errorf("control connection local IP %q is not reachable from external SOCKS5 clients and no public %s interface address was found; configure udp.advertise explicitly", controlLocal, family)
+		// No public interface address was found. On internal or multi-homed
+		// servers the client is on the same network as the SOCKS5 listener,
+		// so advertising the control connection's local address lets the
+		// client send UDP datagrams to the interface it already reached.
+		s.log.Debug("UDP relay falling back to control-local address", "control_local", controlLocal)
+		return controlLocal, nil
 	}
 	return controlLocal, nil
 }
