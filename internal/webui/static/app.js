@@ -57,7 +57,81 @@ async function loadVohiveEvents(){const root=$('#vohive-event-list');root.innerH
 function renderVohiveEventDeviceFilters(events){const root=$('#vohive-event-device-filters');const devices=Array.from(new Set(events.map(e=>e.device_id).filter(Boolean))).sort();const selected=root.dataset.selected||'';root.innerHTML=['<button type="button" class="filter-chip'+(selected===''?' selected':'')+'" data-device="">全部设备</button>',...devices.map(d=>`<button type="button" class="filter-chip${selected===d?' selected':''}" data-device="${esc(d)}">${esc(d)}</button>`)].join('')}
 function renderVohiveEvents(events){const root=$('#vohive-event-list');const selected=$('#vohive-event-device-filters').dataset.selected||'';const filtered=selected?events.filter(e=>e.device_id===selected):events;if(!filtered.length){root.innerHTML='<div class="empty-state">没有匹配的 Vohive 事件</div>';return}root.innerHTML=filtered.map(e=>{const cls=vohiveTypeClass[e.type]||'info',label=vohiveTypeLabel[e.type]||e.type,hasDetails=e.details&&Object.keys(e.details).length;const err=e.type==='degraded'||e.type==='recovery_failed'?esc(e.message):'';return`<div class="log-row event-row" data-expanded="false"><time>${time(e.created_at)}</time><span class="level event-type ${cls}">${esc(label)}</span><span class="event-device">${esc(e.device_id||'—')}</span><div class="log-message"><strong>${esc(e.message)}</strong>${err?`<code class="event-error">${err}</code>`:''}${hasDetails?`<code class="event-details hidden">${esc(JSON.stringify(e.details,null,2))}</code>`:''}</div><button type="button" class="event-toggle" title="展开详情" aria-label="展开详情">${hasDetails?'›':''}</button></div>`}).join('');root.querySelectorAll('.event-row').forEach(row=>{row.querySelector('.event-toggle')?.addEventListener('click',()=>{const expanded=row.dataset.expanded==='true';row.dataset.expanded=!expanded;row.querySelector('.event-details')?.classList.toggle('hidden',expanded);row.querySelector('.event-toggle').textContent=expanded?'›':'⌄'})})}
 
-function showPage(page){state.page=page;$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===page));$$('.page').forEach(x=>x.classList.toggle('active',x.id===`page-${page}`));const titles={overview:['NETWORK OVERVIEW','连接，一目了然。'],configuration:['SQLITE CONFIGURATION','配置，即刻生效。'],performance:['LIVE PERFORMANCE','性能，持续可见。'],logs:['DIAGNOSTICS','每个错误，都有迹可循。'],settings:['SYSTEM & SECURITY','设置，尽在掌控。'],'vohive-events':['RECOVERY EVENTS','链路恢复事件。']};const t=titles[page]||['WWAN CONTROL',''];$('#page-eyebrow').textContent=t[0];$('#page-title').textContent=t[1];$('#add-button').style.display=page==='configuration'||page==='overview'?'':'none';if(state.overview&&['overview','configuration','performance'].includes(page))render();if(page==='logs')loadLogs();if(page==='settings')loadSettings();if(page==='vohive-events')loadVohiveEvents()}
+let statsCache={points:[],summary:{}};
+
+async function loadStatistics(){
+  try{
+    const servers=await api('/api/stats/servers');
+    renderStatsServerSelect(servers);
+    await loadStatsData();
+  }catch(e){toast(e.message,true)}
+}
+
+function renderStatsServerSelect(servers){
+  const sel=$('#stats-server');
+  const cur=sel.value;
+  sel.innerHTML='<option value="0">全部出口</option>'+servers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  sel.value=cur||'0';
+}
+
+async function loadStatsData(){
+  const range=$('#stats-range').dataset.range||'24h';
+  const duration=range==='7d'?7*24*60*60*1000:24*60*60*1000;
+  const to=new Date(),from=new Date(to.getTime()-duration);
+  const serverID=$('#stats-server').value;
+  const q=`from=${from.toISOString()}&to=${to.toISOString()}&step=minute`+(serverID!=='0'?`&server_id=${encodeURIComponent(serverID)}`:'');
+  const [points,summary]=await Promise.all([
+    api(`/api/stats?${q}`),
+    api(`/api/stats/summary?${q}`)
+  ]);
+  const pts=points||[],sum=summary||{};
+  statsCache.points=pts;
+  statsCache.summary=sum;
+  renderStatsSummary(sum);
+  renderStatsCharts(pts);
+}
+
+function renderStatsSummary(s){
+  $('#stats-upload').textContent=bytes(s.upload_bytes||0);
+  $('#stats-download').textContent=bytes(s.download_bytes||0);
+  $('#stats-latency').textContent=s.avg_latency_ms?`${s.avg_latency_ms} ms`:'—';
+  $('#stats-success').textContent=(typeof s.success_rate==='number')?`${(s.success_rate*100).toFixed(2)}%`:'—';
+}
+
+function renderStatsCharts(points){
+  drawStatsLineChart('stats-traffic-chart',points,[{field:'upload_bytes',color:'var(--blue)'},{field:'download_bytes',color:'var(--purple)'}],bytes);
+  drawStatsLineChart('stats-latency-chart',points,[{field:'heartbeat_latency_ms',color:'var(--orange)'}],v=>`${v} ms`);
+  drawStatsLineChart('stats-success-chart',points,[{field:'success_rate',color:'var(--green)'}],v=>`${(v*100).toFixed(0)}%`);
+}
+
+function drawStatsLineChart(canvasId,points,fields,formatValue){
+  const c=$(`#${canvasId}`);if(!c)return;
+  const dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  if(!w||!h)return;
+  c.width=w*dpr;c.height=h*dpr;
+  const x=c.getContext('2d');x.scale(dpr,dpr);x.clearRect(0,0,w,h);
+  const styles=getComputedStyle(document.documentElement),line=styles.getPropertyValue('--line');
+  x.strokeStyle=line;x.lineWidth=1;
+  for(let i=1;i<5;i++){x.beginPath();x.moveTo(0,h*i/5);x.lineTo(w,h*i/5);x.stroke()}
+  if(!points||points.length<2)return;
+  const start=Date.parse(points[0].bucket),end=Date.parse(points[points.length-1].bucket);
+  const range=Math.max(1,end-start);
+  const allValues=points.flatMap(p=>fields.map(f=>Number(p[f.field])||0));
+  const max=Math.max(...allValues,1);
+  fields.forEach(({field,color})=>{
+    x.beginPath();
+    points.forEach((p,i)=>{
+      const px=((Date.parse(p.bucket)-start)/range)*w;
+      const py=h-18-((Number(p[field])||0)/max)*(h-36);
+      i?x.lineTo(px,py):x.moveTo(px,py);
+    });
+    x.strokeStyle=color;x.lineWidth=2.5;x.lineJoin='round';x.stroke();
+  });
+  x.fillStyle=styles.getPropertyValue('--muted');x.font='10px -apple-system';
+  x.fillText(formatValue(max),8,13);
+}
+
+function showPage(page){state.page=page;$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===page));$$('.page').forEach(x=>x.classList.toggle('active',x.id===`page-${page}`));const titles={overview:['NETWORK OVERVIEW','连接，一目了然。'],configuration:['SQLITE CONFIGURATION','配置，即刻生效。'],performance:['LIVE PERFORMANCE','性能，持续可见。'],logs:['DIAGNOSTICS','每个错误，都有迹可循。'],settings:['SYSTEM & SECURITY','设置，尽在掌控。'],'vohive-events':['RECOVERY EVENTS','链路恢复事件。'],statistics:['STATISTICS','历史统计，趋势可见。']};const t=titles[page]||['WWAN CONTROL',''];$('#page-eyebrow').textContent=t[0];$('#page-title').textContent=t[1];$('#add-button').style.display=page==='configuration'||page==='overview'?'':'none';if(state.overview&&['overview','configuration','performance'].includes(page))render();if(page==='logs')loadLogs();if(page==='settings')loadSettings();if(page==='vohive-events')loadVohiveEvents();if(page==='statistics')loadStatistics()}
 
 async function loadInterfaces(){try{state.interfaces=await api('/api/interfaces');$('#network-interfaces').innerHTML=state.interfaces.map(item=>`<option value="${esc(item.name)}" label="${esc(item.addresses?.join(', ')||item.flags)}"></option>`).join('')}catch(error){toast(`读取本机网口失败：${error.message}`,true)}}
 function openForm(id=0){
@@ -101,7 +175,7 @@ async function submitAuth(e){e.preventDefault();const f=e.currentTarget,button=f
 function updatePasswordStrength(value){let score=0;if(value.length>=12)score++;if(value.length>=16)score++;if(/[a-z]/.test(value)&&/[A-Z]/.test(value))score++;if(/\d/.test(value)&&/[^\w]/.test(value))score++;const labels=['尚未输入','较弱','一般','良好','很强'],colors=['var(--red)','var(--red)','var(--orange)','var(--blue)','var(--green)'];$('#password-strength i').style.width=`${score*25}%`;$('#password-strength i').style.background=colors[score];$('#password-strength b').textContent=labels[score]}
 async function logout(){try{await api('/api/auth/logout',{method:'POST'});}catch{}showAuth(true);toast('已安全退出')}
 
-$$('.nav-item').forEach(x=>x.onclick=()=>showPage(x.dataset.page));$('#refresh-button').onclick=()=>refresh(true);$('#add-button').onclick=()=>openForm();$('#modal-close').onclick=closeForm;$('#cancel-button').onclick=closeForm;$('#config-form').onsubmit=submitForm;$('#config-form').elements.dns_mode.onchange=updateDNSFields;$('#config-form').elements.auth_method.onchange=updateAuthFields;$('#config-form').elements.http_proxy_enabled.onchange=updateHTTPProxyFields;$('#config-form').elements.upstream_enabled.onchange=updateUpstreamFields;$('#config-form').elements.upstream_auth_method.onchange=updateUpstreamFields;$('#modal').onclick=e=>{if(e.target.id==='modal')closeForm()};$('#log-refresh').onclick=loadLogs;$('#log-level').onchange=loadLogs;$('#log-search').onkeydown=e=>{if(e.key==='Enter')loadLogs()};$('#vohive-events-refresh').onclick=loadVohiveEvents;$('#vohive-event-type').onchange=loadVohiveEvents;$('#vohive-event-device-filters').onclick=e=>{const chip=e.target.closest('.filter-chip');if(!chip)return;$('#vohive-event-device-filters').dataset.selected=chip.dataset.device;renderVohiveEventDeviceFilters(vohiveEventsCache);renderVohiveEvents(vohiveEventsCache)};$('#system-settings-form').onsubmit=saveSystemSettings;$('#system-settings-form').elements.vohive_enabled.onchange=updateVohiveFields;$('#admin-settings-form').onsubmit=saveAdminSettings;$('#revoke-others').onclick=async()=>{try{await api('/api/sessions/revoke-others',{method:'POST'});toast('其他登录会话已全部撤销');await loadSettings()}catch(e){toast(e.message,true)}};$('#delete-button').onclick=async()=>{const id=$('#config-form').elements.id.value;if(!id||!await confirmAction('删除出口配置','将同时删除该实例保存的心跳状态。正在处理的代理连接会被关闭，此操作无法撤销。','删除配置'))return;try{await api(`/api/servers/${id}`,{method:'DELETE'});closeForm();toast('配置已删除');await refresh()}catch(e){toast(e.message,true)}};$('#confirm-cancel').onclick=()=>closeConfirm(false);$('#confirm-accept').onclick=()=>closeConfirm(true);$('#confirm-modal').onclick=e=>{if(e.target.id==='confirm-modal')closeConfirm(false)};$('#auth-form').onsubmit=submitAuth;$('#auth-form').elements.password.oninput=e=>updatePasswordStrength(e.target.value);$('#account-button').onclick=e=>{e.stopPropagation();e.currentTarget.parentElement.classList.toggle('open')};$('#logout-button').onclick=logout;window.addEventListener('resize',drawChart);window.addEventListener('online',()=>connectOverview(true));window.addEventListener('pagehide',saveHistory);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&!overviewSocket)connectOverview()});document.addEventListener('click',()=>$('.account-menu').classList.remove('open'));document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(confirmResolver)closeConfirm(false);else closeForm();closeCustomSelects();$('.account-menu').classList.remove('open')}});
+$$('.nav-item').forEach(x=>x.onclick=()=>showPage(x.dataset.page));$('#refresh-button').onclick=()=>refresh(true);$('#add-button').onclick=()=>openForm();$('#modal-close').onclick=closeForm;$('#cancel-button').onclick=closeForm;$('#config-form').onsubmit=submitForm;$('#config-form').elements.dns_mode.onchange=updateDNSFields;$('#config-form').elements.auth_method.onchange=updateAuthFields;$('#config-form').elements.http_proxy_enabled.onchange=updateHTTPProxyFields;$('#config-form').elements.upstream_enabled.onchange=updateUpstreamFields;$('#config-form').elements.upstream_auth_method.onchange=updateUpstreamFields;$('#modal').onclick=e=>{if(e.target.id==='modal')closeForm()};$('#log-refresh').onclick=loadLogs;$('#log-level').onchange=loadLogs;$('#log-search').onkeydown=e=>{if(e.key==='Enter')loadLogs()};$('#vohive-events-refresh').onclick=loadVohiveEvents;$('#vohive-event-type').onchange=loadVohiveEvents;$('#vohive-event-device-filters').onclick=e=>{const chip=e.target.closest('.filter-chip');if(!chip)return;$('#vohive-event-device-filters').dataset.selected=chip.dataset.device;renderVohiveEventDeviceFilters(vohiveEventsCache);renderVohiveEvents(vohiveEventsCache)};$('#stats-refresh').onclick=loadStatsData;$('#stats-server').onchange=loadStatsData;$('#stats-range').onclick=e=>{const chip=e.target.closest('.filter-chip');if(!chip)return;$('#stats-range').dataset.range=chip.dataset.range;$$('#stats-range .filter-chip').forEach(c=>c.classList.toggle('selected',c===chip));loadStatsData()};$('#system-settings-form').onsubmit=saveSystemSettings;$('#system-settings-form').elements.vohive_enabled.onchange=updateVohiveFields;$('#admin-settings-form').onsubmit=saveAdminSettings;$('#revoke-others').onclick=async()=>{try{await api('/api/sessions/revoke-others',{method:'POST'});toast('其他登录会话已全部撤销');await loadSettings()}catch(e){toast(e.message,true)}};$('#delete-button').onclick=async()=>{const id=$('#config-form').elements.id.value;if(!id||!await confirmAction('删除出口配置','将同时删除该实例保存的心跳状态。正在处理的代理连接会被关闭，此操作无法撤销。','删除配置'))return;try{await api(`/api/servers/${id}`,{method:'DELETE'});closeForm();toast('配置已删除');await refresh()}catch(e){toast(e.message,true)}};$('#confirm-cancel').onclick=()=>closeConfirm(false);$('#confirm-accept').onclick=()=>closeConfirm(true);$('#confirm-modal').onclick=e=>{if(e.target.id==='confirm-modal')closeConfirm(false)};$('#auth-form').onsubmit=submitAuth;$('#auth-form').elements.password.oninput=e=>updatePasswordStrength(e.target.value);$('#account-button').onclick=e=>{e.stopPropagation();e.currentTarget.parentElement.classList.toggle('open')};$('#logout-button').onclick=logout;window.addEventListener('resize',()=>{drawChart();if(state.page==='statistics')renderStatsCharts(statsCache.points)});window.addEventListener('online',()=>connectOverview(true));window.addEventListener('pagehide',saveHistory);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&!overviewSocket)connectOverview()});document.addEventListener('click',()=>$('.account-menu').classList.remove('open'));document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(confirmResolver)closeConfirm(false);else closeForm();closeCustomSelects();$('.account-menu').classList.remove('open')}});
 $('#config-form').elements.bind_enabled.onchange=updateBindFields;$('#auth-users-add').onclick=()=>{const list=$('#auth-users-list');if(list.querySelector('.empty-hint'))list.innerHTML='';list.insertAdjacentHTML('beforeend',authUserRow('','',false));bindAuthUserRows()};$('#udp-map-add').onclick=()=>{const list=$('#udp-map-list');if(list.querySelector('.empty-hint'))list.innerHTML='';list.insertAdjacentHTML('beforeend',udpMapRow('',''));bindUDPMapRows()};
 $('#config-form').elements.udp_relay_ports.addEventListener('input',updateUDPPortFields);
 $('#config-form').elements.auth_method.addEventListener('change',updateSecurityWarning);
@@ -109,5 +183,6 @@ $('#config-form').elements.listen.addEventListener('input',updateSecurityWarning
 $('#config-form').elements.http_proxy_enabled.addEventListener('change',updateSecurityWarning);
 $('#config-form').elements.http_proxy_listen.addEventListener('input',updateSecurityWarning);
 $('#config-form').elements.admission_cidrs.addEventListener('input',updateSecurityWarning);
+window.addEventListener('resize',()=>{drawChart();if(state.page==='statistics')renderStatsCharts(statsCache.points)});
 initCustomSelects();
 boot();
