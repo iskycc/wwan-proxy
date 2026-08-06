@@ -385,7 +385,7 @@ func (m *Manager) newInstance(cfg config.Server, limits *instanceLimits) *instan
 	}
 	if settings, err := m.store.SystemSettings(ctx); err == nil && settings.Vohive.Enabled && cfg.VohiveDeviceID != "" {
 		inst.vohiveSettings = settings.Vohive
-		inst.vohiveClient = vohive.NewClient(settings.Vohive.BaseURL, settings.Vohive.Token, 30*time.Second)
+		inst.vohiveClient = vohive.NewClient(settings.Vohive.BaseURL, settings.Vohive.Username, settings.Vohive.Password, 30*time.Second)
 	}
 	return inst
 }

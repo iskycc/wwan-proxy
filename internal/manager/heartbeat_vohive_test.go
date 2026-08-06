@@ -104,6 +104,14 @@ func TestVohiveRecoveryFullFlowRestartsDeviceAndReloadsInstance(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
+		case http.MethodPost:
+			if r.URL.Path == "/api/auth/login" {
+				_ = json.NewEncoder(w).Encode(vohive.LoginResponse{
+					ExpiresAt: time.Now().Add(time.Hour), Status: "ok", Token: "test-token",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case http.MethodPatch:
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -159,6 +167,7 @@ func TestVohiveRecoveryFullFlowRestartsDeviceAndReloadsInstance(t *testing.T) {
 	defer mu.Unlock()
 
 	want := []requestRecord{
+		{method: http.MethodPost, path: "/api/auth/login"},
 		{method: http.MethodPatch, path: "/api/devices/Y2/network"},
 		{method: http.MethodPatch, path: "/api/devices/Y2/network"},
 		{method: http.MethodGet, path: "/api/devices/Y2/network"},
@@ -180,6 +189,12 @@ func TestVohiveRecoveryRetriesStatusUntilPublicIP(t *testing.T) {
 	callCount := 0
 	vohiveServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/auth/login" {
+			_ = json.NewEncoder(w).Encode(vohive.LoginResponse{
+				ExpiresAt: time.Now().Add(time.Hour), Status: "ok", Token: "test-token",
+			})
+			return
+		}
 		if r.Method == http.MethodPatch {
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -252,7 +267,7 @@ func newVohiveTestManagerWithURL(t *testing.T, vohiveURL string) (*Manager, *sto
 	settings := config.SystemSettings{
 		WebListen: "127.0.0.1:9090",
 		Vohive: config.VohiveSettings{
-			Enabled: true, BaseURL: vohiveURL, Token: "token123",
+			Enabled: true, BaseURL: vohiveURL, Username: "user", Password: "pass",
 			ConsecutiveFailures: 2, Cooldown: config.Duration(5 * time.Minute),
 		},
 	}

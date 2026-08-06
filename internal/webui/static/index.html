@@ -127,7 +127,8 @@
               <div class="settings-fields">
                 <label class="toggle-label span-2"><input type="checkbox" name="vohive_enabled"><span></span>启用 Vohive 自动恢复</label>
                 <label class="vohive-field span-2">Vohive Base URL<input name="vohive_base_url" placeholder="http://192.168.8.88:7575"><small>包含协议和端口</small></label>
-                <label class="vohive-field span-2">Vohive Token<input type="password" name="vohive_token" placeholder="Bearer 后面的 token 字符串"><small>保存在本地 SQLite 中</small></label>
+                <label class="vohive-field span-2">Vohive 用户名<input name="vohive_username" placeholder="登录 Vohive 控制台的用户名"><small>用于自动获取 access token</small></label>
+                <label class="vohive-field span-2">Vohive 密码<input type="password" name="vohive_password" placeholder="登录密码"><small>保存在本地 SQLite 中，token 过期后自动重新登录</small></label>
                 <label class="vohive-field">连续失败阈值<input type="number" min="1" max="100" name="vohive_consecutive_failures" value="2"><small>达到该次数后触发设备网络重启</small></label>
                 <label class="vohive-field">冷却时间<input name="vohive_cooldown" value="5m"><small>两次恢复操作之间的最小间隔</small></label>
               </div>

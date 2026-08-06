@@ -254,7 +254,7 @@ func TestVohiveSettingsValidation(t *testing.T) {
 
 	t.Run("enabled requires base_url", func(t *testing.T) {
 		s := base
-		s.Vohive = VohiveSettings{Enabled: true, Token: "tok"}
+		s.Vohive = VohiveSettings{Enabled: true, Username: "user", Password: "pass"}
 		if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "base_url") {
 			t.Fatalf("expected base_url error, got %v", err)
 		}
@@ -262,23 +262,27 @@ func TestVohiveSettingsValidation(t *testing.T) {
 
 	t.Run("enabled requires valid http or https base_url", func(t *testing.T) {
 		s := base
-		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "ftp://example.com", Token: "tok"}
+		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "ftp://example.com", Username: "user", Password: "pass"}
 		if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "base_url") {
 			t.Fatalf("expected base_url error, got %v", err)
 		}
 	})
 
-	t.Run("enabled requires token", func(t *testing.T) {
+	t.Run("enabled requires username and password", func(t *testing.T) {
 		s := base
 		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com"}
-		if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "token") {
-			t.Fatalf("expected token error, got %v", err)
+		if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "username") {
+			t.Fatalf("expected username error, got %v", err)
+		}
+		s.Vohive.Username = "user"
+		if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "password") {
+			t.Fatalf("expected password error, got %v", err)
 		}
 	})
 
 	t.Run("enabled with valid fields is valid", func(t *testing.T) {
 		s := base
-		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Token: "tok"}
+		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Username: "user", Password: "pass"}
 		if err := s.Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -287,7 +291,7 @@ func TestVohiveSettingsValidation(t *testing.T) {
 	t.Run("consecutive_failures out of range", func(t *testing.T) {
 		for _, value := range []int{-1, 101} {
 			s := base
-			s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Token: "tok", ConsecutiveFailures: value}
+			s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Username: "user", Password: "pass", ConsecutiveFailures: value}
 			if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "consecutive_failures") {
 				t.Fatalf("value=%d expected consecutive_failures error, got %v", value, err)
 			}
@@ -296,7 +300,7 @@ func TestVohiveSettingsValidation(t *testing.T) {
 
 	t.Run("consecutive_failures zero applies default", func(t *testing.T) {
 		s := base
-		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Token: "tok", ConsecutiveFailures: 0}
+		s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Username: "user", Password: "pass", ConsecutiveFailures: 0}
 		if err := s.Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -308,7 +312,7 @@ func TestVohiveSettingsValidation(t *testing.T) {
 	t.Run("cooldown out of range", func(t *testing.T) {
 		for _, value := range []time.Duration{30 * time.Second, 25 * time.Hour} {
 			s := base
-			s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Token: "tok", Cooldown: Duration(value)}
+			s.Vohive = VohiveSettings{Enabled: true, BaseURL: "http://example.com", Username: "user", Password: "pass", Cooldown: Duration(value)}
 			if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "cooldown") {
 				t.Fatalf("value=%v expected cooldown error, got %v", value, err)
 			}

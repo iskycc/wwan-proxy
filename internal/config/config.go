@@ -243,7 +243,8 @@ type Heartbeat struct {
 type VohiveSettings struct {
 	Enabled             bool     `json:"enabled"`
 	BaseURL             string   `json:"base_url"`
-	Token               string   `json:"token"`
+	Username            string   `json:"username"`
+	Password            string   `json:"password"`
 	ConsecutiveFailures int      `json:"consecutive_failures"`
 	Cooldown            Duration `json:"cooldown"`
 }
@@ -308,8 +309,11 @@ func (s *SystemSettings) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("vohive.base_url must be a valid http or https URL")
 		}
-		if s.Vohive.Token == "" {
-			return fmt.Errorf("vohive.token is required when enabled")
+		if s.Vohive.Username == "" {
+			return fmt.Errorf("vohive.username is required when enabled")
+		}
+		if s.Vohive.Password == "" {
+			return fmt.Errorf("vohive.password is required when enabled")
 		}
 		if s.Vohive.ConsecutiveFailures < 1 || s.Vohive.ConsecutiveFailures > 100 {
 			return fmt.Errorf("vohive.consecutive_failures must be between 1 and 100")
