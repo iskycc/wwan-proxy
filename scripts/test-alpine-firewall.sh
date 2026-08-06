@@ -441,11 +441,19 @@ for attempt in $(seq 1 30); do
   fi
   sleep 1
 done
-if ! docker exec "${ufw_container_name}" test -x /usr/sbin/ufw; then
-  echo "/usr/sbin/ufw not found after bootstrap" >&2
-  docker exec "${ufw_container_name}" cat /tmp/bootstrap.log >&2 || true
-  exit 1
-fi
+# The ufw binary may take a moment to become visible via overlayfs after the
+# bootstrap script execs /sbin/init; give it time to settle.
+for attempt in $(seq 1 30); do
+  if docker exec "${ufw_container_name}" test -x /usr/sbin/ufw; then
+    break
+  fi
+  if [[ ${attempt} -eq 30 ]]; then
+    echo "/usr/sbin/ufw not found after bootstrap" >&2
+    docker exec "${ufw_container_name}" cat /tmp/bootstrap.log >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
 docker exec "${ufw_container_name}" sh -ec '
   /usr/sbin/ufw --force enable >/dev/null
   rc-update add ufw default >/dev/null
