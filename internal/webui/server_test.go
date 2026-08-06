@@ -322,6 +322,157 @@ func TestVohiveEventsAPI(t *testing.T) {
 	}
 }
 
+func newTestServer(t *testing.T) (*httptest.Server, *store.Store, *http.Client) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := manager.New(ctx, st, logger)
+	t.Cleanup(mgr.Close)
+	ui := New("127.0.0.1:0", st, mgr, logger)
+	ts := httptest.NewServer(ui.http.Handler)
+	t.Cleanup(ts.Close)
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+
+	// Initialize admin so authenticated endpoints are reachable.
+	authBody := []byte(`{"username":"administrator","password":"StrongPassword!42"}`)
+	resp, err := client.Post(ts.URL+"/api/auth/initialize", "application/json", bytes.NewReader(authBody))
+	if err != nil {
+		t.Fatalf("initialize admin: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("initialize admin status=%d", resp.StatusCode)
+	}
+	return ts, st, client
+}
+
+func TestStatsHandlers(t *testing.T) {
+	ts, st, client := newTestServer(t)
+
+	ctx := context.Background()
+	cfg := config.Server{Enabled: true, Name: "stats-test", Listen: "127.0.0.1:11090", Interface: "lo", Auth: config.Auth{Method: "none"}}
+	if err := st.SaveServer(ctx, &cfg); err != nil {
+		t.Fatalf("save server: %v", err)
+	}
+	if cfg.ID == 0 {
+		t.Fatal("server id not assigned")
+	}
+
+	bucket := time.Now().UTC().Truncate(time.Minute)
+	if err := st.SaveServerStats(ctx, []store.ServerStats{{
+		ServerID:           cfg.ID,
+		Bucket:             bucket,
+		TCPUploadBytes:     100,
+		TCPDownloadBytes:   200,
+		ActiveConnections:  3,
+		HeartbeatLatencyMs: 20,
+		HeartbeatHealthy:   true,
+		InstanceStartedAt:  bucket,
+	}}); err != nil {
+		t.Fatalf("save server stats: %v", err)
+	}
+
+	resp, err := client.Get(ts.URL + "/api/stats/servers")
+	if err != nil {
+		t.Fatalf("stats servers request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stats servers status=%d body=%s", resp.StatusCode, body)
+	}
+	var servers []map[string]any
+	if err := json.Unmarshal(body, &servers); err != nil {
+		t.Fatalf("decode stats servers: %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(servers))
+	}
+
+	resp, err = client.Get(ts.URL + "/api/stats?server_id=" + strconv.FormatInt(cfg.ID, 10))
+	if err != nil {
+		t.Fatalf("stats request: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stats status=%d body=%s", resp.StatusCode, body)
+	}
+	var stats []map[string]any
+	if err := json.Unmarshal(body, &stats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 stats row, got %d", len(stats))
+	}
+	if stats[0]["upload_bytes"] == nil || stats[0]["download_bytes"] == nil {
+		t.Fatalf("stats response missing upload/download bytes: %+v", stats[0])
+	}
+	if stats[0]["bucket"] == "" {
+		t.Fatalf("stats response missing bucket: %+v", stats[0])
+	}
+
+	resp, err = client.Get(ts.URL + "/api/stats/summary?server_id=" + strconv.FormatInt(cfg.ID, 10))
+	if err != nil {
+		t.Fatalf("stats summary request: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stats summary status=%d body=%s", resp.StatusCode, body)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(body, &summary); err != nil {
+		t.Fatalf("decode stats summary: %v", err)
+	}
+	if summary["total_buckets"] != float64(1) {
+		t.Fatalf("expected 1 total bucket, got %v", summary["total_buckets"])
+	}
+	if summary["success_rate"] == nil {
+		t.Fatal("summary response missing success_rate")
+	}
+
+	// Validation error: invalid step.
+	resp, err = client.Get(ts.URL + "/api/stats?server_id=" + strconv.FormatInt(cfg.ID, 10) + "&step=week")
+	if err != nil {
+		t.Fatalf("invalid step request: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid step status=%d body=%s", resp.StatusCode, body)
+	}
+
+	// Validation error: from after to.
+	resp, err = client.Get(ts.URL + "/api/stats?server_id=" + strconv.FormatInt(cfg.ID, 10) + "&from=2024-01-02T00:00:00Z&to=2024-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("from after to request: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("from after to status=%d body=%s", resp.StatusCode, body)
+	}
+
+	// Validation error: invalid server_id.
+	resp, err = client.Get(ts.URL + "/api/stats?server_id=not-a-number")
+	if err != nil {
+		t.Fatalf("invalid server_id request: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid server_id status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestWebListenNetworkRespectsLiteralAddressFamily(t *testing.T) {
 	tests := map[string]string{
 		"0.0.0.0:9090":      "tcp4",

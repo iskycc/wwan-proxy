@@ -9,24 +9,24 @@ import (
 
 // ServerStats stores per-server, per-bucket traffic and health metrics.
 type ServerStats struct {
-	ID                   int64
-	ServerID             int64
-	Bucket               time.Time
-	TCPUploadBytes       uint64
-	TCPDownloadBytes     uint64
-	UDPUploadBytes       uint64
-	UDPDownloadBytes     uint64
-	HTTPUploadBytes      uint64
-	HTTPDownloadBytes    uint64
-	TotalConnections     uint64
-	ConnectionErrors     uint64
-	TotalRequests        uint64
-	RequestErrors        uint64
-	ActiveConnections    int64
-	HeartbeatLatencyMs   int64
-	HeartbeatHealthy     bool
-	InstanceStartedAt    time.Time
-	CreatedAt            time.Time
+	ID                 int64
+	ServerID           int64
+	Bucket             time.Time
+	TCPUploadBytes     uint64
+	TCPDownloadBytes   uint64
+	UDPUploadBytes     uint64
+	UDPDownloadBytes   uint64
+	HTTPUploadBytes    uint64
+	HTTPDownloadBytes  uint64
+	TotalConnections   uint64
+	ConnectionErrors   uint64
+	TotalRequests      uint64
+	RequestErrors      uint64
+	ActiveConnections  int64
+	HeartbeatLatencyMs int64
+	HeartbeatHealthy   bool
+	InstanceStartedAt  time.Time
+	CreatedAt          time.Time
 }
 
 // ListServerStatsOptions controls which server_stats rows are returned and how
@@ -234,13 +234,13 @@ func aggregateStatsByStep(raw []ServerStats, step string) []ServerStats {
 
 // ServerStatsSummary is a rolled-up view of server statistics over a range.
 type ServerStatsSummary struct {
-	UploadBytes           uint64
-	DownloadBytes         uint64
-	AvgLatencyMs          int64
-	SuccessRate           float64
-	PeakActiveConnections int64
-	TotalBuckets          int
-	HealthyBuckets        int
+	UploadBytes           uint64  `json:"upload_bytes"`
+	DownloadBytes         uint64  `json:"download_bytes"`
+	AvgLatencyMs          int64   `json:"avg_latency_ms"`
+	SuccessRate           float64 `json:"success_rate"`
+	PeakActiveConnections int64   `json:"peak_active_connections"`
+	TotalBuckets          int     `json:"total_buckets"`
+	HealthyBuckets        int     `json:"healthy_buckets"`
 }
 
 // ServerStatsSummary returns aggregated statistics for a server over a time
