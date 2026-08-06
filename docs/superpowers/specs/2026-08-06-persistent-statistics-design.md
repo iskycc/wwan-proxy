@@ -20,21 +20,21 @@ One row per server per minute bucket.
 | `id` | INTEGER PK AUTOINCREMENT | |
 | `server_id` | INTEGER NOT NULL | FK to `server_configs(id)` ON DELETE CASCADE |
 | `bucket` | TEXT NOT NULL | Minute bucket in RFC3339 format, e.g. `2026-08-06T10:23:00Z` |
-| `tcp_upload_bytes` | INTEGER | Delta since previous bucket |
-| `tcp_download_bytes` | INTEGER | Delta since previous bucket |
-| `udp_upload_bytes` | INTEGER | Delta since previous bucket |
-| `udp_download_bytes` | INTEGER | Delta since previous bucket |
-| `http_upload_bytes` | INTEGER | Delta since previous bucket |
-| `http_download_bytes` | INTEGER | Delta since previous bucket |
-| `total_connections` | INTEGER | Delta since previous bucket |
-| `connection_errors` | INTEGER | Delta since previous bucket |
-| `total_requests` | INTEGER | HTTP request delta |
-| `request_errors` | INTEGER | HTTP request error delta |
-| `active_connections` | INTEGER | Snapshot value at sample time |
-| `heartbeat_latency_ms` | INTEGER | Snapshot from latest heartbeat |
-| `heartbeat_healthy` | INTEGER | 0/1 snapshot |
-| `instance_started_at` | TEXT | Server instance `started_at` used to detect restart |
-| `created_at` | TEXT | Insertion timestamp |
+| `tcp_upload_bytes` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `tcp_download_bytes` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `udp_upload_bytes` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `udp_download_bytes` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `http_upload_bytes` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `http_download_bytes` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `total_connections` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `connection_errors` | INTEGER NOT NULL DEFAULT 0 | Delta since previous bucket |
+| `total_requests` | INTEGER NOT NULL DEFAULT 0 | HTTP request delta |
+| `request_errors` | INTEGER NOT NULL DEFAULT 0 | HTTP request error delta |
+| `active_connections` | INTEGER NOT NULL DEFAULT 0 | Snapshot value at sample time |
+| `heartbeat_latency_ms` | INTEGER NOT NULL DEFAULT 0 | Snapshot from latest heartbeat |
+| `heartbeat_healthy` | INTEGER NOT NULL DEFAULT 0 | 0/1 snapshot |
+| `instance_started_at` | TEXT NOT NULL | Server instance `started_at` used to detect restart |
+| `created_at` | TEXT NOT NULL | Insertion timestamp |
 
 Indexes:
 - `idx_server_stats_server_bucket` on `(server_id, bucket DESC)`
@@ -52,7 +52,7 @@ A new `statsCollector` runs inside `internal/manager`:
    - Maintains an in-memory map `lastCounters[serverID]counters` with `startedAt` generation.
    - Computes deltas against the previous sample.
    - If `startedAt` changed (instance restarted), the first delta equals the current cumulative value (treating the new counter base as zero).
-   - Inserts one `server_stats` row per server via `s.store.SaveServerStatsBatch(ctx, rows)`.
+   - Inserts one `server_stats` row per server via `s.store.SaveServerStats(ctx, rows)`.
 4. Runs a prune every hour, deleting buckets older than 7 days.
 5. Errors are logged with `slog.Warn`/`Error`; collection never blocks proxy paths.
 
