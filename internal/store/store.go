@@ -247,7 +247,29 @@ CREATE TABLE IF NOT EXISTS vohive_events (
 );
 CREATE INDEX IF NOT EXISTS idx_vohive_events_device ON vohive_events(device_id);
 CREATE INDEX IF NOT EXISTS idx_vohive_events_type ON vohive_events(type);
-CREATE INDEX IF NOT EXISTS idx_vohive_events_created ON vohive_events(created_at);`
+CREATE INDEX IF NOT EXISTS idx_vohive_events_created ON vohive_events(created_at);
+CREATE TABLE IF NOT EXISTS server_stats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id INTEGER NOT NULL REFERENCES server_configs(id) ON DELETE CASCADE,
+  bucket TEXT NOT NULL,
+  tcp_upload_bytes INTEGER NOT NULL DEFAULT 0,
+  tcp_download_bytes INTEGER NOT NULL DEFAULT 0,
+  udp_upload_bytes INTEGER NOT NULL DEFAULT 0,
+  udp_download_bytes INTEGER NOT NULL DEFAULT 0,
+  http_upload_bytes INTEGER NOT NULL DEFAULT 0,
+  http_download_bytes INTEGER NOT NULL DEFAULT 0,
+  total_connections INTEGER NOT NULL DEFAULT 0,
+  connection_errors INTEGER NOT NULL DEFAULT 0,
+  total_requests INTEGER NOT NULL DEFAULT 0,
+  request_errors INTEGER NOT NULL DEFAULT 0,
+  active_connections INTEGER NOT NULL DEFAULT 0,
+  heartbeat_latency_ms INTEGER NOT NULL DEFAULT 0,
+  heartbeat_healthy INTEGER NOT NULL DEFAULT 0,
+  instance_started_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_server_stats_server_bucket ON server_stats(server_id, bucket DESC);
+CREATE INDEX IF NOT EXISTS idx_server_stats_bucket ON server_stats(bucket);`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
