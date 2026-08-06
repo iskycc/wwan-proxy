@@ -56,6 +56,7 @@
         <button class="nav-item" data-page="performance"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 18V9m5 9V5m6 13v-6m5 6V3"/></svg></span><span class="nav-label">性能</span></button>
         <button class="nav-item" data-page="logs"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M7 6h13M7 12h13M7 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></span><span class="nav-label">日志</span></button>
         <button class="nav-item" data-page="vohive-events"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a5 5 0 0 1-10 0v-2.26A6.978 6.978 0 0 1 5 9a7 7 0 0 1 7-7Zm0 3a4 4 0 0 0-4 4c0 1.6.94 2.98 2.31 3.63l.69.32V17a3 3 0 0 0 6 0v-3.05l.69-.32A4 4 0 0 0 16 9a4 4 0 0 0-4-4Z"/></svg></span><span class="nav-label">事件</span></button>
+        <button class="nav-item" data-page="statistics"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></span><span class="nav-label">统计</span></button>
         <button class="nav-item" data-page="settings"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6M6 14v6"/></svg></span><span class="nav-label">设置</span></button>
       </nav>
       <div class="sidebar-footer"><span class="live-dot"></span><div><strong>管理服务在线</strong><span id="side-uptime">运行中</span></div></div>
@@ -113,6 +114,42 @@
         <div class="panel glass-card">
           <div class="panel-head log-head"><div><p class="eyebrow">RECOVERY EVENTS</p><h3>事件</h3></div><div class="log-filters"><select class="native-select" id="vohive-event-type"><option value="">全部类型</option><option value="degraded">链路异常</option><option value="recovery_started">恢复开始</option><option value="recovery_succeeded">恢复成功</option><option value="recovery_failed">恢复失败</option><option value="recovered">已恢复</option></select><div class="filter-chips" id="vohive-event-device-filters"></div><button class="secondary-button" id="vohive-events-refresh">刷新</button></div></div>
           <div class="log-list" id="vohive-event-list"><div class="empty-state">暂无 Vohive 事件</div></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-statistics">
+        <div class="panel glass-card">
+          <div class="panel-head log-head">
+            <div><p class="eyebrow">HISTORICAL STATISTICS</p><h3>统计</h3></div>
+            <div class="log-filters stats-filters">
+              <select class="native-select" id="stats-server"><option value="0">全部出口</option></select>
+              <div class="filter-chips" id="stats-range">
+                <button type="button" class="filter-chip selected" data-range="24h">24 小时</button>
+                <button type="button" class="filter-chip" data-range="7d">7 天</button>
+              </div>
+              <button class="secondary-button" id="stats-refresh">刷新</button>
+            </div>
+          </div>
+          <div class="stats-kpis kpi-grid" id="stats-kpis">
+            <article class="metric-card"><span>总上行</span><strong id="stats-upload">0 B</strong></article>
+            <article class="metric-card"><span>总下行</span><strong id="stats-download">0 B</strong></article>
+            <article class="metric-card"><span>平均延迟</span><strong id="stats-latency">—</strong></article>
+            <article class="metric-card"><span>成功率</span><strong id="stats-success">—</strong></article>
+          </div>
+          <div class="stats-charts">
+            <div class="panel glass-card chart-panel">
+              <div class="panel-head"><div><p class="eyebrow">TRAFFIC</p><h3>流量趋势</h3></div></div>
+              <canvas id="stats-traffic-chart" height="240"></canvas>
+            </div>
+            <div class="panel glass-card chart-panel">
+              <div class="panel-head"><div><p class="eyebrow">LATENCY</p><h3>延迟趋势</h3></div></div>
+              <canvas id="stats-latency-chart" height="240"></canvas>
+            </div>
+            <div class="panel glass-card chart-panel">
+              <div class="panel-head"><div><p class="eyebrow">SUCCESS RATE</p><h3>成功率趋势</h3></div></div>
+              <canvas id="stats-success-chart" height="240"></canvas>
+            </div>
+          </div>
         </div>
       </section>
 
