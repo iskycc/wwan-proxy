@@ -12,10 +12,11 @@ import (
 )
 
 type vohiveHealthState struct {
-	mu        sync.RWMutex
-	devices   map[string]vohive.DeviceHealth
-	fastUntil time.Time
-	lastError string
+	mu           sync.RWMutex
+	devices      map[string]vohive.DeviceHealth
+	fastUntil    time.Time
+	fastRefCount int
+	lastError    string
 }
 
 func (m *Manager) startVohiveHeartbeat(settings config.VohiveSettings) {
@@ -57,6 +58,9 @@ func (m *Manager) runOneVohiveHeartbeatTick(ctx context.Context) {
 		m.vohiveHealth.lastError = err.Error()
 		m.vohiveHealth.mu.Unlock()
 		m.log.Error("vohive health check failed", "error", err)
+		m.recordVohiveEvent(ctx, store.VohiveEventDegraded, "system", nil,
+			fmt.Sprintf("vohive health check failed: %v", err),
+			map[string]any{"error": err.Error()})
 		return
 	}
 	m.vohiveHealth.mu.Lock()
@@ -89,7 +93,7 @@ func (m *Manager) vohiveInterval(fast bool) time.Duration {
 func (s *vohiveHealthState) fastMode() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return time.Until(s.fastUntil) > 0
+	return s.fastRefCount > 0 || time.Until(s.fastUntil) > 0
 }
 
 func (m *Manager) setVohiveFastMode(fast bool) {
@@ -102,7 +106,32 @@ func (m *Manager) setVohiveFastMode(fast bool) {
 		m.vohiveHealth.fastUntil = time.Now().Add(5 * time.Minute)
 	} else {
 		m.vohiveHealth.fastUntil = time.Time{}
+		m.vohiveHealth.fastRefCount = 0
 	}
+}
+
+func (m *Manager) enterVohiveFastMode() {
+	if m.vohiveHealth == nil {
+		return
+	}
+	m.vohiveHealth.mu.Lock()
+	m.vohiveHealth.fastRefCount++
+	m.vohiveHealth.mu.Unlock()
+}
+
+func (m *Manager) leaveVohiveFastMode() {
+	if m.vohiveHealth == nil {
+		return
+	}
+	m.vohiveHealth.mu.Lock()
+	if m.vohiveHealth.fastRefCount > 0 {
+		m.vohiveHealth.fastRefCount--
+	}
+	if m.vohiveHealth.fastRefCount == 0 {
+		// Keep fast mode alive for a 30 s grace period after the last failure.
+		m.vohiveHealth.fastUntil = time.Now().Add(30 * time.Second)
+	}
+	m.vohiveHealth.mu.Unlock()
 }
 
 func (m *Manager) vohiveSettings() config.VohiveSettings {

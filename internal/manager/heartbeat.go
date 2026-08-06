@@ -116,6 +116,79 @@ func (m *Manager) runVohiveRecovery(ctx context.Context, inst *instance, deviceI
 	return nil
 }
 
+func (m *Manager) heartbeatCheckResult(inst *instance, probe heartbeatProbeResult) {
+	h := probe.heartbeat
+	endpoint := inst.cfg.Heartbeat.URL
+	timeout := inst.cfg.Heartbeat.Timeout.Value(12 * time.Second)
+	previousHealthy := inst.heartbeatPrevHealthy
+	if !h.Healthy {
+		inst.heartbeatConsecutiveFailures++
+		if inst.heartbeatFirstFailure.IsZero() {
+			inst.heartbeatFirstFailure = h.CheckedAt
+		}
+		inst.setError("heartbeat: " + h.Error)
+		iface := collectInterfaceDiagnostic(inst.cfg.Interface)
+		signature := probe.failureStage + "\x00" + h.Error + "\x00" + iface.signature()
+		now := time.Now()
+		if previousHealthy == nil || *previousHealthy || signature != inst.heartbeatPreviousFailureSignature || now.Sub(inst.heartbeatLastFailureLog) >= heartbeatFailureReminder {
+			args := []any{
+				"server", inst.cfg.Name,
+				"interface", inst.cfg.Interface,
+				"endpoint", sanitizeHeartbeatEndpoint(endpoint),
+				"target_host", heartbeatTargetHost(endpoint),
+				"stage", probe.failureStage,
+				"classification", classifyHeartbeatFailure(probe.failureStage, probe.cause),
+				"timeout", timeout,
+				"latency_ms", h.LatencyMS,
+				"http_status", h.StatusCode,
+				"consecutive_failures", inst.heartbeatConsecutiveFailures,
+				"failure_duration", now.Sub(inst.heartbeatFirstFailure).Round(time.Millisecond),
+				"error", h.Error,
+				"error_chain", heartbeatErrorChain(probe.cause, endpoint),
+			}
+			args = append(args, probe.trace.logAttrs(endpoint)...)
+			args = append(args, heartbeatDNSLogAttrs(inst.cfg)...)
+			args = append(args, iface.logAttrs()...)
+			m.log.Error("egress heartbeat failed", args...)
+			inst.heartbeatLastFailureLog = now
+		}
+		inst.heartbeatPreviousFailureSignature = signature
+		m.maybeTriggerVohiveRecovery(inst, inst.heartbeatConsecutiveFailures)
+		m.enterVohiveFastMode()
+	} else if previousHealthy != nil && !*previousHealthy {
+		inst.clearHeartbeatError()
+		m.log.Warn("egress heartbeat recovered", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo, "failed_checks", inst.heartbeatConsecutiveFailures, "failure_duration", time.Since(inst.heartbeatFirstFailure).Round(time.Millisecond))
+		inst.heartbeatFirstFailure = time.Time{}
+		inst.heartbeatLastFailureLog = time.Time{}
+		inst.heartbeatPreviousFailureSignature = ""
+		inst.heartbeatConsecutiveFailures = 0
+		m.leaveVohiveFastMode()
+		m.maybeReloadAfterHeartbeatRecovery(inst)
+	} else if previousHealthy == nil {
+		m.log.Info("egress heartbeat healthy", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo)
+	}
+	healthy := h.Healthy
+	inst.heartbeatPrevHealthy = &healthy
+}
+
+func (m *Manager) maybeReloadAfterHeartbeatRecovery(inst *instance) {
+	if inst.cfg.VohiveDeviceID == "" || m.vohiveHealth == nil {
+		return
+	}
+	m.vohiveHealth.mu.RLock()
+	dh, ok := m.vohiveHealth.devices[inst.cfg.VohiveDeviceID]
+	lastErr := m.vohiveHealth.lastError
+	m.vohiveHealth.mu.RUnlock()
+	if lastErr != "" {
+		return
+	}
+	if ok && dh.Healthy {
+		if err := m.vohiveReload(m.ctx, inst.cfg.ID); err != nil {
+			m.log.Error("failed to reload server after heartbeat recovery", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", inst.cfg.VohiveDeviceID, "error", err)
+		}
+	}
+}
+
 func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 	timeout := inst.cfg.Heartbeat.Timeout.Value(12 * time.Second)
 	interval := inst.cfg.Heartbeat.Interval.Value(30 * time.Second)
@@ -131,67 +204,15 @@ func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 		// heartbeat endpoint expand that privilege through an HTTP redirect.
 		CheckRedirect: rejectHeartbeatRedirect,
 	}
-	var previousHealthy *bool
-	var firstFailure time.Time
-	var lastFailureLog time.Time
-	var previousFailureSignature string
-	var consecutiveFailures int
 	check := func() {
 		probe := executeHeartbeat(ctx, client, inst.cfg.ID, endpoint, timeout)
-		h := probe.heartbeat
 		if ctx.Err() != nil {
 			return
 		}
-		if err := m.store.SaveHeartbeat(ctx, h); err != nil {
+		if err := m.store.SaveHeartbeat(ctx, probe.heartbeat); err != nil {
 			m.log.Error("save heartbeat status failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "error", err)
 		}
-		if !h.Healthy {
-			consecutiveFailures++
-			if firstFailure.IsZero() {
-				firstFailure = h.CheckedAt
-			}
-			inst.setError("heartbeat: " + h.Error)
-			iface := collectInterfaceDiagnostic(inst.cfg.Interface)
-			signature := probe.failureStage + "\x00" + h.Error + "\x00" + iface.signature()
-			now := time.Now()
-			if previousHealthy == nil || *previousHealthy || signature != previousFailureSignature || now.Sub(lastFailureLog) >= heartbeatFailureReminder {
-				args := []any{
-					"server", inst.cfg.Name,
-					"interface", inst.cfg.Interface,
-					"endpoint", sanitizeHeartbeatEndpoint(endpoint),
-					"target_host", heartbeatTargetHost(endpoint),
-					"stage", probe.failureStage,
-					"classification", classifyHeartbeatFailure(probe.failureStage, probe.cause),
-					"timeout", timeout,
-					"latency_ms", h.LatencyMS,
-					"http_status", h.StatusCode,
-					"consecutive_failures", consecutiveFailures,
-					"failure_duration", now.Sub(firstFailure).Round(time.Millisecond),
-					"error", h.Error,
-					"error_chain", heartbeatErrorChain(probe.cause, endpoint),
-				}
-				args = append(args, probe.trace.logAttrs(endpoint)...)
-				args = append(args, heartbeatDNSLogAttrs(inst.cfg)...)
-				args = append(args, iface.logAttrs()...)
-				m.log.Error("egress heartbeat failed", args...)
-				lastFailureLog = now
-			}
-			previousFailureSignature = signature
-			m.maybeTriggerVohiveRecovery(inst, consecutiveFailures)
-		} else if previousHealthy == nil || !*previousHealthy {
-			inst.clearHeartbeatError()
-			if previousHealthy != nil {
-				m.log.Warn("egress heartbeat recovered", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo, "failed_checks", consecutiveFailures, "failure_duration", time.Since(firstFailure).Round(time.Millisecond))
-			} else {
-				m.log.Info("egress heartbeat healthy", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "endpoint", sanitizeHeartbeatEndpoint(endpoint), "latency_ms", h.LatencyMS, "public_ip", h.PublicIP, "colo", h.Colo)
-			}
-			firstFailure = time.Time{}
-			lastFailureLog = time.Time{}
-			previousFailureSignature = ""
-			consecutiveFailures = 0
-		}
-		healthy := h.Healthy
-		previousHealthy = &healthy
+		m.heartbeatCheckResult(inst, probe)
 	}
 	check()
 	ticker := time.NewTicker(interval)

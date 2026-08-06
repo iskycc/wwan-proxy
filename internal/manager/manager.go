@@ -55,6 +55,12 @@ type instance struct {
 	vohiveClient    *vohive.Client
 	vohiveSettings  config.VohiveSettings
 
+	heartbeatPrevHealthy              *bool
+	heartbeatConsecutiveFailures      int
+	heartbeatFirstFailure             time.Time
+	heartbeatLastFailureLog           time.Time
+	heartbeatPreviousFailureSignature string
+
 	mu                sync.RWMutex
 	launched          bool
 	socksRunning      bool
