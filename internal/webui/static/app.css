@@ -164,3 +164,10 @@ main{max-width:3240px;padding:82px 104px 136px}.topbar{min-height:80px;margin-bo
 @media(prefers-color-scheme:dark){.filter-chip{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.08)}.filter-chip:hover{background:rgba(255,255,255,.1);color:#fff}.event-row[data-expanded="true"]{background:rgba(255,255,255,.02)}.event-error{background:rgba(240,68,56,.1)}.event-details{background:rgba(255,255,255,.04)}}
 @media(max-width:720px){.event-row{grid-template-columns:105px 70px 1fr 24px}.event-device{display:none}.filter-chips{order:3;width:100%;margin-top:6px}.log-filters{flex-wrap:wrap}}
 @media(min-width:1600px){.event-row{grid-template-columns:175px 100px 100px 1fr 34px;font-size:13px}.event-type{font-size:11px}.event-device{font-size:12px}}
+
+/* Statistics page */
+.stats-kpis{margin:18px 0 22px}
+.stats-charts{display:flex;flex-direction:column;gap:18px}
+.stats-charts .chart-panel{min-height:320px;margin-bottom:0}
+@media(max-width:720px){.stats-charts .chart-panel{min-height:260px}}
+@media(min-width:1600px){.stats-charts .chart-panel{min-height:360px}}
