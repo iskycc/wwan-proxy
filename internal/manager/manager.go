@@ -39,6 +39,11 @@ type Manager struct {
 	systemVohiveSettings  config.VohiveSettings
 	vohiveHeartbeatCancel context.CancelFunc
 	vohiveHeartbeatWG     sync.WaitGroup
+
+	closed               bool
+	vohiveRecoveryCtx    context.Context
+	vohiveRecoveryCancel context.CancelFunc
+	vohiveRecoveryWG     sync.WaitGroup
 }
 
 type instance struct {
@@ -137,12 +142,19 @@ func New(ctx context.Context, st *store.Store, logger *slog.Logger) *Manager {
 		}
 	}
 	m.vohiveRecovery = m.runVohiveRecovery
+	m.vohiveRecoveryCtx, m.vohiveRecoveryCancel = context.WithCancel(ctx)
 	return m
 }
 
 func (m *Manager) StartAll(ctx context.Context) error {
 	m.transition.Lock()
 	defer m.transition.Unlock()
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		return errors.New("manager is closed")
+	}
 	configs, err := m.store.ListServers(ctx)
 	if err != nil {
 		return err
@@ -166,6 +178,12 @@ func (m *Manager) StartAll(ctx context.Context) error {
 func (m *Manager) Reload(_ context.Context, id int64) error {
 	m.transition.Lock()
 	defer m.transition.Unlock()
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		return errors.New("manager is closed")
+	}
 	loadCtx, loadCancel := context.WithTimeout(m.ctx, 5*time.Second)
 	defer loadCancel()
 	cfg, err := m.store.GetServer(loadCtx, id)
@@ -301,7 +319,6 @@ func (m *Manager) Remove(id int64) { m.stop(id) }
 
 func (m *Manager) Close() {
 	m.transition.Lock()
-	defer m.transition.Unlock()
 	m.mu.RLock()
 	instances := make([]*instance, 0, len(m.instances))
 	for _, inst := range m.instances {
@@ -310,12 +327,15 @@ func (m *Manager) Close() {
 	m.mu.RUnlock()
 	m.mu.Lock()
 	clear(m.instances)
+	m.closed = true
 	m.mu.Unlock()
 	m.drainMu.Lock()
 	for _, cancel := range m.draining {
 		cancel()
 	}
 	m.drainMu.Unlock()
+	m.transition.Unlock()
+
 	for _, inst := range instances {
 		m.shutdownInstance(inst)
 	}
@@ -324,6 +344,8 @@ func (m *Manager) Close() {
 		m.vohiveHeartbeatCancel()
 	}
 	m.vohiveHeartbeatWG.Wait()
+	m.vohiveRecoveryCancel()
+	m.vohiveRecoveryWG.Wait()
 }
 
 func (m *Manager) start(cfg config.Server) {

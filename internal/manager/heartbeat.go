@@ -48,13 +48,15 @@ func (m *Manager) maybeTriggerVohiveRecovery(inst *instance, consecutiveFailures
 	inst.lastVohiveAttempt = time.Now()
 	inst.mu.Unlock()
 
+	m.vohiveRecoveryWG.Add(1)
 	go func() {
 		defer func() {
 			inst.mu.Lock()
 			inst.vohiveInProgress = false
 			inst.mu.Unlock()
+			m.vohiveRecoveryWG.Done()
 		}()
-		m.vohiveRecovery(m.ctx, inst, inst.cfg.VohiveDeviceID)
+		m.vohiveRecovery(m.vohiveRecoveryCtx, inst, inst.cfg.VohiveDeviceID)
 	}()
 }
 

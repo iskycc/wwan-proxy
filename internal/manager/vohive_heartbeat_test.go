@@ -173,6 +173,9 @@ func TestHeartbeatFailureEntersVohiveFastMode(t *testing.T) {
 	if inst == nil {
 		t.Fatal("instance not created")
 	}
+	inst.heartbeatCancel()
+	inst.cancel()
+	inst.wg.Wait()
 
 	m.heartbeatCheckResult(inst, heartbeatProbeResult{
 		heartbeat:    store.Heartbeat{Healthy: false, Error: "probe failure"},
@@ -228,6 +231,9 @@ func TestHeartbeatRecoveryLeavesVohiveFastModeAndReloads(t *testing.T) {
 	if inst == nil {
 		t.Fatal("instance not created")
 	}
+	inst.heartbeatCancel()
+	inst.cancel()
+	inst.wg.Wait()
 
 	m.heartbeatCheckResult(inst, heartbeatProbeResult{
 		heartbeat:    store.Heartbeat{Healthy: false, Error: "probe failure"},
@@ -277,5 +283,63 @@ func TestVohiveHealthFailureRecordsEvent(t *testing.T) {
 	}
 	if degradedCount != 1 {
 		t.Fatalf("expected 1 degraded event for system, got %d", degradedCount)
+	}
+}
+
+func TestManagerCloseWaitsForVohiveRecovery(t *testing.T) {
+	m, st, cfg, cleanup := newVohiveTestManager(t)
+	defer cleanup()
+	defer st.Close()
+
+	inst := m.instances[cfg.ID]
+	if inst == nil {
+		t.Fatal("instance not created")
+	}
+
+	done := make(chan struct{})
+	m.vohiveRecovery = func(ctx context.Context, inst *instance, deviceID string) error {
+		<-ctx.Done()
+		close(done)
+		return ctx.Err()
+	}
+
+	inst.mu.Lock()
+	inst.vohiveInProgress = false
+	inst.lastVohiveAttempt = time.Time{}
+	inst.mu.Unlock()
+
+	m.maybeTriggerVohiveRecovery(inst, 2)
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		m.Close()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery goroutine was not canceled")
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish")
+	}
+}
+
+func TestVohiveHeartbeatShutdownDoesNotRecordFalseDegradedEvent(t *testing.T) {
+	m, st, _, cleanup := newVohiveTestManager(t)
+	defer cleanup()
+	defer st.Close()
+
+	m.Close()
+
+	events, err := st.ListVohiveEvents(context.Background(), store.ListVohiveEventsOptions{DeviceID: "system"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no system degraded events after shutdown, got %+v", events)
 	}
 }

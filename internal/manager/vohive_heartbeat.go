@@ -54,6 +54,9 @@ func (m *Manager) runOneVohiveHeartbeatTick(ctx context.Context) {
 	client := vohive.NewClient(settings.BaseURL, settings.Username, settings.Password, 30*time.Second)
 	health, err := client.GetHealth(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		m.vohiveHealth.mu.Lock()
 		m.vohiveHealth.lastError = err.Error()
 		m.vohiveHealth.mu.Unlock()
