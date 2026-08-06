@@ -120,6 +120,19 @@
               <label>日志保留天数<input required type="number" min="1" max="3650" name="log_retention_days"><small>保存后立即执行过期清理</small></label>
               <label>登录会话有效期<input required name="session_lifetime" placeholder="24h"><small>适用于之后创建的新会话</small></label>
             </div>
+
+            <div class="vohive-section" id="vohive-settings-panel">
+              <div class="panel-head"><div><p class="eyebrow">VOHIVE RECOVERY</p><h3>设备网络自动恢复</h3></div><span class="settings-badge" id="vohive-badge">未启用</span></div>
+              <p class="settings-copy">当出口心跳连续失败时，通过 Vohive API 重启指定设备的移动数据网络。</p>
+              <div class="settings-fields">
+                <label class="toggle-label span-2"><input type="checkbox" name="vohive_enabled"><span></span>启用 Vohive 自动恢复</label>
+                <label class="vohive-field span-2">Vohive Base URL<input name="vohive_base_url" placeholder="http://192.168.8.88:7575"><small>包含协议和端口</small></label>
+                <label class="vohive-field span-2">Vohive Token<input type="password" name="vohive_token" placeholder="Bearer 后面的 token 字符串"><small>保存在本地 SQLite 中</small></label>
+                <label class="vohive-field">连续失败阈值<input type="number" min="1" max="100" name="vohive_consecutive_failures" value="2"><small>达到该次数后触发设备网络重启</small></label>
+                <label class="vohive-field">冷却时间<input name="vohive_cooldown" value="5m"><small>两次恢复操作之间的最小间隔</small></label>
+              </div>
+            </div>
+
             <div class="restart-notice hidden" id="restart-notice"><i>!</i><span><strong>存在待生效的启动设置</strong><small>请在合适时间重启 wwan-proxy；当前连接不会被自动中断。</small></span></div>
             <div class="form-error" id="settings-error"></div>
             <div class="panel-actions"><span></span><button class="primary-button" type="submit">保存系统设置</button></div>
@@ -154,6 +167,7 @@
         <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>SOCKS5、HTTP/HTTPS Proxy、出口网口与连接限制</span></div></div>
         <label>名称<input required name="name" placeholder="wwan0"></label>
         <label>出口网口（物理 / 虚拟均可）<input required name="interface" list="network-interfaces" placeholder="如 eth0、enp3s0、wwan0"><small>直接填写 Linux 网口名；候选项来自本机实时发现。</small></label>
+        <label class="vohive-device-field">Vohive Device ID<input name="vohive_device_id" placeholder="如 Y2"><small>仅当系统设置启用 Vohive 时生效</small></label>
         <datalist id="network-interfaces"></datalist>
         <label>SOCKS5 监听<input required name="listen" value="0.0.0.0:1080"></label>
         <label class="toggle-label"><input type="checkbox" name="http_proxy_enabled"><span></span>启用 HTTP / HTTPS Proxy</label>

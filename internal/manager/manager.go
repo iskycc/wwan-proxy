@@ -14,6 +14,7 @@ import (
 	"wwan-proxy/internal/policy"
 	"wwan-proxy/internal/socks5"
 	"wwan-proxy/internal/store"
+	"wwan-proxy/internal/vohive"
 )
 
 type Manager struct {
@@ -28,6 +29,11 @@ type Manager struct {
 	draining        map[*instance]context.CancelFunc
 	drainWG         sync.WaitGroup
 	preflightDevice func(string) error
+
+	vohiveRecovery         func(context.Context, *instance, string) error
+	vohiveReload           func(context.Context, int64) error
+	vohivePostRestartSleep func(context.Context) error
+	vohiveStatusRetryDelay func(context.Context) error
 }
 
 type instance struct {
@@ -41,13 +47,17 @@ type instance struct {
 	wg              sync.WaitGroup
 	startedAt       time.Time
 	limits          *instanceLimits
+	vohiveClient    *vohive.Client
+	vohiveSettings  config.VohiveSettings
 
-	mu            sync.RWMutex
-	launched      bool
-	socksRunning  bool
-	httpRunning   bool
-	lastError     string
-	startupErrors chan error
+	mu                sync.RWMutex
+	launched          bool
+	socksRunning      bool
+	httpRunning       bool
+	lastError         string
+	startupErrors     chan error
+	vohiveInProgress  bool
+	lastVohiveAttempt time.Time
 }
 
 type instanceLimits struct {
@@ -89,11 +99,34 @@ type InstanceSnapshot struct {
 }
 
 func New(ctx context.Context, st *store.Store, logger *slog.Logger) *Manager {
-	return &Manager{
+	m := &Manager{
 		store: st, log: logger.With("component", "manager"), ctx: ctx,
 		instances: make(map[int64]*instance), draining: make(map[*instance]context.CancelFunc),
 		preflightDevice: defaultDevicePreflight,
 	}
+	m.vohiveReload = m.Reload
+	m.vohivePostRestartSleep = func(ctx context.Context) error {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	m.vohiveStatusRetryDelay = func(ctx context.Context) error {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	m.vohiveRecovery = m.runVohiveRecovery
+	return m
 }
 
 func (m *Manager) StartAll(ctx context.Context) error {
@@ -345,11 +378,16 @@ func (m *Manager) newInstance(cfg config.Server, limits *instanceLimits) *instan
 	if cfg.HTTPProxy.Enabled {
 		httpProxy = httpproxy.NewWithLimiters(cfg, m.log, srv.DialContext, limits.connections, limits.clients)
 	}
-	return &instance{
+	inst := &instance{
 		cfg: cfg, server: srv, httpProxy: httpProxy, ctx: ctx, cancel: cancel,
 		heartbeatCtx: heartbeatCtx, heartbeatCancel: heartbeatCancel, limits: limits,
 		socksRunning: true, httpRunning: cfg.HTTPProxy.Enabled, startupErrors: make(chan error, 4),
 	}
+	if settings, err := m.store.SystemSettings(ctx); err == nil && settings.Vohive.Enabled && cfg.VohiveDeviceID != "" {
+		inst.vohiveSettings = settings.Vohive
+		inst.vohiveClient = vohive.NewClient(settings.Vohive.BaseURL, settings.Vohive.Token, 30*time.Second)
+	}
+	return inst
 }
 
 func (m *Manager) launch(inst *instance) {

@@ -61,6 +61,7 @@ type Server struct {
 	Upstream       Upstream      `json:"upstream"`
 	UDP            UDP           `json:"udp"`
 	Heartbeat      Heartbeat     `json:"heartbeat"`
+	VohiveDeviceID string        `json:"vohive_device_id"`
 }
 
 // Clone returns a structurally independent configuration snapshot. Server is
@@ -239,12 +240,21 @@ type Heartbeat struct {
 	Timeout  Duration `json:"timeout"`
 }
 
+type VohiveSettings struct {
+	Enabled             bool     `json:"enabled"`
+	BaseURL             string   `json:"base_url"`
+	Token               string   `json:"token"`
+	ConsecutiveFailures int      `json:"consecutive_failures"`
+	Cooldown            Duration `json:"cooldown"`
+}
+
 type SystemSettings struct {
-	WebListen        string   `json:"web_listen"`
-	DatabasePath     string   `json:"database_path"`
-	LogLevel         string   `json:"log_level"`
-	LogRetentionDays int      `json:"log_retention_days"`
-	SessionLifetime  Duration `json:"session_lifetime"`
+	WebListen        string         `json:"web_listen"`
+	DatabasePath     string         `json:"database_path"`
+	LogLevel         string         `json:"log_level"`
+	LogRetentionDays int            `json:"log_retention_days"`
+	SessionLifetime  Duration       `json:"session_lifetime"`
+	Vohive           VohiveSettings `json:"vohive"`
 }
 
 func (s *SystemSettings) ApplyDefaults() {
@@ -261,6 +271,12 @@ func (s *SystemSettings) ApplyDefaults() {
 	}
 	if s.SessionLifetime == 0 {
 		s.SessionLifetime = Duration(24 * time.Hour)
+	}
+	if s.Vohive.ConsecutiveFailures == 0 {
+		s.Vohive.ConsecutiveFailures = 2
+	}
+	if s.Vohive.Cooldown == 0 {
+		s.Vohive.Cooldown = Duration(5 * time.Minute)
 	}
 }
 
@@ -283,6 +299,25 @@ func (s *SystemSettings) Validate() error {
 	lifetime := time.Duration(s.SessionLifetime)
 	if lifetime < 5*time.Minute || lifetime > 30*24*time.Hour {
 		return fmt.Errorf("session_lifetime must be between 5m and 720h")
+	}
+	if s.Vohive.Enabled {
+		if s.Vohive.BaseURL == "" {
+			return fmt.Errorf("vohive.base_url is required when enabled")
+		}
+		u, err := url.Parse(s.Vohive.BaseURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("vohive.base_url must be a valid http or https URL")
+		}
+		if s.Vohive.Token == "" {
+			return fmt.Errorf("vohive.token is required when enabled")
+		}
+		if s.Vohive.ConsecutiveFailures < 1 || s.Vohive.ConsecutiveFailures > 100 {
+			return fmt.Errorf("vohive.consecutive_failures must be between 1 and 100")
+		}
+		cooldown := time.Duration(s.Vohive.Cooldown)
+		if cooldown < time.Minute || cooldown > 24*time.Hour {
+			return fmt.Errorf("vohive.cooldown must be between 1m and 24h")
+		}
 	}
 	return nil
 }
@@ -569,6 +604,9 @@ func (s *Server) Validate() error {
 	}
 	if time.Duration(s.Heartbeat.Timeout) < time.Second || time.Duration(s.Heartbeat.Timeout) > time.Duration(s.Heartbeat.Interval) {
 		return fmt.Errorf("heartbeat.timeout must be between 1s and heartbeat.interval")
+	}
+	if len(s.VohiveDeviceID) > 64 {
+		return fmt.Errorf("vohive_device_id must not exceed 64 characters")
 	}
 	return nil
 }

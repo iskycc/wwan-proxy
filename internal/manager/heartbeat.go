@@ -13,11 +13,99 @@ import (
 	"time"
 
 	"wwan-proxy/internal/store"
+	"wwan-proxy/internal/vohive"
 )
 
 const heartbeatURL = "https://1.1.1.1/cdn-cgi/trace"
 
 var heartbeatFailureReminder = 5 * time.Minute
+
+func (m *Manager) maybeTriggerVohiveRecovery(inst *instance, consecutiveFailures int) {
+	if inst.vohiveClient == nil || inst.cfg.VohiveDeviceID == "" {
+		return
+	}
+	threshold := inst.vohiveSettings.ConsecutiveFailures
+	if threshold == 0 {
+		threshold = 2
+	}
+	if consecutiveFailures < threshold {
+		return
+	}
+	inst.mu.Lock()
+	if inst.vohiveInProgress {
+		inst.mu.Unlock()
+		return
+	}
+	cooldown := time.Duration(inst.vohiveSettings.Cooldown)
+	if cooldown == 0 {
+		cooldown = 5 * time.Minute
+	}
+	if !inst.lastVohiveAttempt.IsZero() && time.Since(inst.lastVohiveAttempt) < cooldown {
+		inst.mu.Unlock()
+		return
+	}
+	inst.vohiveInProgress = true
+	inst.lastVohiveAttempt = time.Now()
+	inst.mu.Unlock()
+
+	go func() {
+		defer func() {
+			inst.mu.Lock()
+			inst.vohiveInProgress = false
+			inst.mu.Unlock()
+		}()
+		m.vohiveRecovery(m.ctx, inst, inst.cfg.VohiveDeviceID)
+	}()
+}
+
+func (m *Manager) runVohiveRecovery(ctx context.Context, inst *instance, deviceID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	var status vohive.NetworkStatus
+	status, err := inst.vohiveClient.RestartDevice(ctx, deviceID)
+	if err != nil {
+		m.log.Error("vohive device restart failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+		return err
+	}
+	if !status.NetworkConnected {
+		m.log.Error("vohive device restart did not restore network connectivity", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "status", status.Status)
+		return nil
+	}
+
+	m.log.Info("vohive device network restarted, reloading instance", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "private_ip", status.PrivateIP)
+	if err := m.vohiveReload(ctx, inst.cfg.ID); err != nil {
+		m.log.Error("failed to reload instance after vohive recovery", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+		return err
+	}
+
+	if m.vohivePostRestartSleep != nil {
+		if err := m.vohivePostRestartSleep(ctx); err != nil {
+			m.log.Warn("vohive recovery aborted during post-restart wait", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+			return err
+		}
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		status, err := inst.vohiveClient.GetNetworkStatus(ctx, deviceID)
+		if err != nil {
+			m.log.Warn("vohive status check failed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "attempt", attempt+1, "error", err)
+		} else if status.PublicIP != "" {
+			m.log.Info("vohive recovery confirmed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "public_ip", status.PublicIP)
+			return nil
+		} else {
+			m.log.Warn("vohive status check returned empty public_ip", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "attempt", attempt+1)
+		}
+		if attempt < 2 && m.vohiveStatusRetryDelay != nil {
+			if err := m.vohiveStatusRetryDelay(ctx); err != nil {
+				m.log.Warn("vohive recovery aborted during status retry wait", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID, "error", err)
+				return err
+			}
+		}
+	}
+	m.log.Warn("vohive recovery completed but public_ip was not confirmed", "server", inst.cfg.Name, "interface", inst.cfg.Interface, "device", deviceID)
+	return nil
+}
 
 func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 	timeout := inst.cfg.Heartbeat.Timeout.Value(12 * time.Second)
@@ -80,6 +168,7 @@ func (m *Manager) heartbeatLoop(ctx context.Context, inst *instance) {
 				lastFailureLog = now
 			}
 			previousFailureSignature = signature
+			m.maybeTriggerVohiveRecovery(inst, consecutiveFailures)
 		} else if previousHealthy == nil || !*previousHealthy {
 			inst.clearHeartbeatError()
 			if previousHealthy != nil {

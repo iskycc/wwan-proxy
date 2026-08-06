@@ -156,3 +156,4 @@ main{max-width:3240px;padding:82px 104px 136px}.topbar{min-height:80px;margin-bo
 .kv-row{grid-template-columns:1fr 1fr auto}
 .kv-row span{display:none}
 }
+.vohive-section{margin-top:24px;padding-top:22px;border-top:1px solid var(--line)}.vohive-field{animation:field-reveal .24s ease both}.vohive-device-field{animation:field-reveal .24s ease both}
