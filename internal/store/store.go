@@ -235,7 +235,19 @@ CREATE TABLE IF NOT EXISTS security_migrations (
   cleanup_pending INTEGER NOT NULL DEFAULT 1
 );
 INSERT OR IGNORE INTO security_migrations(name,cleanup_pending)
-VALUES('proxy_credentials_v1',1);`
+VALUES('proxy_credentials_v1',1);
+CREATE TABLE IF NOT EXISTS vohive_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  server_id INTEGER,
+  message TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '{}',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_vohive_events_device ON vohive_events(device_id);
+CREATE INDEX IF NOT EXISTS idx_vohive_events_type ON vohive_events(type);
+CREATE INDEX IF NOT EXISTS idx_vohive_events_created ON vohive_events(created_at);`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
