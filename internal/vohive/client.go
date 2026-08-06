@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+var zeroTime time.Time
+
 type Client struct {
 	baseURL  string
 	username string
