@@ -40,6 +40,9 @@ type Manager struct {
 	vohiveHeartbeatCancel context.CancelFunc
 	vohiveHeartbeatWG     sync.WaitGroup
 
+	statsCancel context.CancelFunc
+	statsWG     sync.WaitGroup
+
 	closed               bool
 	vohiveRecoveryCtx    context.Context
 	vohiveRecoveryCancel context.CancelFunc
@@ -143,6 +146,7 @@ func New(ctx context.Context, st *store.Store, logger *slog.Logger) *Manager {
 	}
 	m.vohiveRecovery = m.runVohiveRecovery
 	m.vohiveRecoveryCtx, m.vohiveRecoveryCancel = context.WithCancel(ctx)
+	m.startStatsCollector()
 	return m
 }
 
@@ -335,6 +339,11 @@ func (m *Manager) Close() {
 	}
 	m.drainMu.Unlock()
 	m.transition.Unlock()
+
+	if m.statsCancel != nil {
+		m.statsCancel()
+	}
+	m.statsWG.Wait()
 
 	for _, inst := range instances {
 		m.shutdownInstance(inst)
