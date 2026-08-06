@@ -84,6 +84,7 @@ func (s Server) Clone() Server {
 		clone.DNS.DoH = &doh
 	}
 	clone.UDP.AdvertiseMap = cloneMap(s.UDP.AdvertiseMap)
+	clone.UDP.AdvertiseSourceMap = cloneMap(s.UDP.AdvertiseSourceMap)
 	clone.UDP.RelayPorts = cloneSlice(s.UDP.RelayPorts)
 	return clone
 }
@@ -196,13 +197,14 @@ func (d DoH) Endpoints() []string {
 }
 
 type UDP struct {
-	Enabled         bool              `json:"enabled"`
-	MaxAssociations int               `json:"max_associations"`
-	StrictEndpoint  bool              `json:"strict_endpoint"`
-	BindIP          string            `json:"bind_ip"`
-	Advertise       string            `json:"advertise"`
-	AdvertiseMap    map[string]string `json:"advertise_map,omitempty"`
-	IdleTimeout     Duration          `json:"idle_timeout"`
+	Enabled            bool              `json:"enabled"`
+	MaxAssociations    int               `json:"max_associations"`
+	StrictEndpoint     bool              `json:"strict_endpoint"`
+	BindIP             string            `json:"bind_ip"`
+	Advertise          string            `json:"advertise"`
+	AdvertiseMap       map[string]string `json:"advertise_map,omitempty"`
+	AdvertiseSourceMap map[string]string `json:"advertise_source_map,omitempty"`
+	IdleTimeout        Duration          `json:"idle_timeout"`
 	// RelayPort is the legacy single fixed RFC 1928 UDP relay port. New
 	// configurations should use RelayPorts, which supports a non-contiguous
 	// pool. The two fields are mutually exclusive.
@@ -568,6 +570,26 @@ func (s *Server) Validate() error {
 		normalizedAdvertiseMap[normalizedLocal] = relayIP.String()
 	}
 	s.UDP.AdvertiseMap = normalizedAdvertiseMap
+	normalizedSourceMap := make(map[string]string, len(s.UDP.AdvertiseSourceMap))
+	for source, relay := range s.UDP.AdvertiseSourceMap {
+		sourceNet, err := parseAdvertiseSourceKey(source)
+		if err != nil {
+			return fmt.Errorf("udp.advertise_source_map key %q: %w", source, err)
+		}
+		relayIP := net.ParseIP(relay)
+		if relayIP == nil || !usableAdvertiseIP(relayIP) {
+			return fmt.Errorf("udp.advertise_source_map relay address %q must be a usable unicast IP address", relay)
+		}
+		if !sameIPFamily(bindIP, sourceNet.IP) || !sameIPFamily(bindIP, relayIP) {
+			return fmt.Errorf("udp.advertise_source_map entry %q -> %q must use the same address family as udp.bind_ip", source, relay)
+		}
+		normalizedSource := sourceNet.String()
+		if _, exists := normalizedSourceMap[normalizedSource]; exists {
+			return fmt.Errorf("udp.advertise_source_map contains duplicate normalized source %q", normalizedSource)
+		}
+		normalizedSourceMap[normalizedSource] = relayIP.String()
+	}
+	s.UDP.AdvertiseSourceMap = normalizedSourceMap
 	if s.UDP.PortMin < 1024 || s.UDP.PortMax > 65535 || s.UDP.PortMin > s.UDP.PortMax {
 		return fmt.Errorf("udp port range must be within 1024..65535 and min must not exceed max")
 	}
@@ -617,6 +639,24 @@ func (s *Server) Validate() error {
 
 func sameIPFamily(a, b net.IP) bool {
 	return a != nil && b != nil && (a.To4() != nil) == (b.To4() != nil)
+}
+
+// parseAdvertiseSourceKey normalizes a udp.advertise_source_map key, which may
+// be either a single IP address or a CIDR, into a *net.IPNet. This lets the
+// runtime match client source IPs uniformly with Contains.
+func parseAdvertiseSourceKey(key string) (*net.IPNet, error) {
+	if ip := net.ParseIP(key); ip != nil {
+		bits := 128
+		if ip.To4() != nil {
+			bits = 32
+		}
+		return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
+	}
+	_, ipNet, err := net.ParseCIDR(key)
+	if err != nil {
+		return nil, fmt.Errorf("must be an IP address or CIDR")
+	}
+	return ipNet, nil
 }
 
 func usableAdvertiseIP(ip net.IP) bool {

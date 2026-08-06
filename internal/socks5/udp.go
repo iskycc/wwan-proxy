@@ -40,6 +40,11 @@ type udpGrantToken struct {
 
 type udpWriteFunc func(*net.UDPConn, []byte, *net.UDPAddr) (int, error)
 
+type sourceAdvertiseEntry struct {
+	source *net.IPNet
+	relay  net.IP
+}
+
 type udpAssociation struct {
 	server    *Server
 	client    *net.UDPConn
@@ -125,7 +130,7 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 	defer clientConn.Close()
 	s.configureUDPBuffers(clientConn, "relay")
 
-	advertiseIP, err := s.udpAdvertiseIP(localTCP.IP)
+	advertiseIP, err := s.udpAdvertiseIP(localTCP.IP, remoteTCP.IP)
 	if err != nil {
 		_ = writeReply(control, repGeneralFailure, nil)
 		return err
@@ -203,10 +208,17 @@ func (s *Server) validateUDPClient(parent context.Context, requested address, pe
 	return fmt.Errorf("UDP requested client host %q does not resolve to TCP peer %s", requested.Host, peerIP)
 }
 
-func (s *Server) udpAdvertiseIP(controlLocal net.IP) (net.IP, error) {
-	bindIP, explicitIP, advertiseMap, err := s.validatedUDPAdvertiseConfig()
+func (s *Server) udpAdvertiseIP(controlLocal, controlRemote net.IP) (net.IP, error) {
+	bindIP, explicitIP, advertiseMap, sourceEntries, err := s.validatedUDPAdvertiseConfig()
 	if err != nil {
 		return nil, err
+	}
+	if controlRemote != nil {
+		for _, entry := range sourceEntries {
+			if entry.source.Contains(controlRemote) {
+				return entry.relay, nil
+			}
+		}
 	}
 	if controlLocal != nil {
 		if mappedIP, ok := advertiseMap[controlLocal.String()]; ok {
@@ -252,10 +264,10 @@ func (s *Server) udpAdvertiseIP(controlLocal net.IP) (net.IP, error) {
 // precedence rule is applied. This is intentionally stricter than validating
 // only the selected candidate: legacy SQLite rows can otherwise hide bad
 // explicit values or non-matching map entries behind a valid mapping.
-func (s *Server) validatedUDPAdvertiseConfig() (net.IP, net.IP, map[string]net.IP, error) {
+func (s *Server) validatedUDPAdvertiseConfig() (net.IP, net.IP, map[string]net.IP, []sourceAdvertiseEntry, error) {
 	bindIP := net.ParseIP(s.cfg.UDP.BindIP)
 	if !usableUDPBindIP(bindIP) {
-		return nil, nil, nil, fmt.Errorf("UDP bind IP %q is not unspecified or a usable unicast address", s.cfg.UDP.BindIP)
+		return nil, nil, nil, nil, fmt.Errorf("UDP bind IP %q is not unspecified or a usable unicast address", s.cfg.UDP.BindIP)
 	}
 
 	var explicitIP net.IP
@@ -263,10 +275,10 @@ func (s *Server) validatedUDPAdvertiseConfig() (net.IP, net.IP, map[string]net.I
 		var err error
 		explicitIP, err = validateUDPReplyIP(net.ParseIP(s.cfg.UDP.Advertise), fmt.Sprintf("UDP advertise IP %q", s.cfg.UDP.Advertise))
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		if !sameUDPIPFamily(bindIP, explicitIP) {
-			return nil, nil, nil, fmt.Errorf("UDP advertise IP %q does not match UDP bind address family", s.cfg.UDP.Advertise)
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise IP %q does not match UDP bind address family", s.cfg.UDP.Advertise)
 		}
 	}
 
@@ -274,21 +286,47 @@ func (s *Server) validatedUDPAdvertiseConfig() (net.IP, net.IP, map[string]net.I
 	for local, relay := range s.cfg.UDP.AdvertiseMap {
 		localIP, relayIP := net.ParseIP(local), net.ParseIP(relay)
 		if !usableUDPAdvertiseMapLocalIP(localIP) {
-			return nil, nil, nil, fmt.Errorf("UDP advertise map local IP %q is not a usable unicast address", local)
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise map local IP %q is not a usable unicast address", local)
 		}
 		if !usableUDPReplyIP(relayIP) {
-			return nil, nil, nil, fmt.Errorf("UDP advertise map relay IP %q is not a usable SOCKS5 UDP relay address", relay)
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise map relay IP %q is not a usable SOCKS5 UDP relay address", relay)
 		}
 		if !sameUDPIPFamily(bindIP, localIP) || !sameUDPIPFamily(bindIP, relayIP) {
-			return nil, nil, nil, fmt.Errorf("UDP advertise map entry %q -> %q does not match UDP bind address family", local, relay)
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise map entry %q -> %q does not match UDP bind address family", local, relay)
 		}
 		canonicalLocal := localIP.String()
 		if _, duplicate := advertiseMap[canonicalLocal]; duplicate {
-			return nil, nil, nil, fmt.Errorf("UDP advertise map contains duplicate normalized local IP %q", canonicalLocal)
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise map contains duplicate normalized local IP %q", canonicalLocal)
 		}
 		advertiseMap[canonicalLocal] = relayIP
 	}
-	return bindIP, explicitIP, advertiseMap, nil
+
+	sourceEntries := make([]sourceAdvertiseEntry, 0, len(s.cfg.UDP.AdvertiseSourceMap))
+	for source, relay := range s.cfg.UDP.AdvertiseSourceMap {
+		var sourceNet *net.IPNet
+		if ip := net.ParseIP(source); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			sourceNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+		} else {
+			_, parsed, err := net.ParseCIDR(source)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("UDP advertise source map key %q: %w", source, err)
+			}
+			sourceNet = parsed
+		}
+		relayIP := net.ParseIP(relay)
+		if !usableUDPReplyIP(relayIP) {
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise source map relay IP %q is not a usable SOCKS5 UDP relay address", relay)
+		}
+		if !sameUDPIPFamily(bindIP, sourceNet.IP) || !sameUDPIPFamily(bindIP, relayIP) {
+			return nil, nil, nil, nil, fmt.Errorf("UDP advertise source map entry %q -> %q does not match UDP bind address family", source, relay)
+		}
+		sourceEntries = append(sourceEntries, sourceAdvertiseEntry{source: sourceNet, relay: relayIP})
+	}
+	return bindIP, explicitIP, advertiseMap, sourceEntries, nil
 }
 
 // usableUDPReplyIP prevents legacy or otherwise unvalidated configuration from

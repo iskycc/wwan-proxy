@@ -269,6 +269,12 @@
           <button type="button" class="secondary-button" id="udp-map-add">＋ 添加映射</button>
           <small>当 UDP 监听地址为内网 IP 时，指定对外广播的公网 IP。</small>
         </div>
+        <div class="span-2">
+          <label>UDP 来源地址映射</label>
+          <div class="kv-table" id="udp-source-map-list"></div>
+          <button type="button" class="secondary-button" id="udp-source-map-add">＋ 添加映射</button>
+          <small>根据客户端来源 IP 或网段决定返回的 UDP Relay 地址，例如 127.0.0.1 → 127.0.0.1，192.168.8.0/24 → 192.168.8.88。</small>
+        </div>
         <div class="form-section-heading span-2"><i>06</i><div><strong>出口心跳</strong><span>健康检查同样通过当前出口网口发出</span></div></div>
         <label class="span-2">心跳 URL<input required name="heartbeat_url" value="https://1.1.1.1/cdn-cgi/trace"></label>
         <label>心跳间隔<input required name="heartbeat_interval" value="30s"></label>

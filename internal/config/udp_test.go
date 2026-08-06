@@ -190,6 +190,45 @@ func TestUDPAdvertiseMapValidationAndNormalization(t *testing.T) {
 	}
 }
 
+func TestUDPAdvertiseSourceMapValidationAndNormalization(t *testing.T) {
+	invalid := []struct {
+		bindIP string
+		source string
+		relay  string
+	}{
+		{bindIP: "0.0.0.0", source: "127.0.0.1", relay: "0.0.0.0"},
+		{bindIP: "0.0.0.0", source: "127.0.0.1", relay: "224.0.0.1"},
+		{bindIP: "0.0.0.0", source: "not-a-cidr", relay: "127.0.0.1"},
+		{bindIP: "0.0.0.0", source: "::1", relay: "127.0.0.1"},
+		{bindIP: "::", source: "::1", relay: "fe80::1"},
+		{bindIP: "::", source: "127.0.0.1", relay: "::1"},
+	}
+	for _, tt := range invalid {
+		cfg := validUDPServerConfig()
+		cfg.UDP.BindIP = tt.bindIP
+		cfg.UDP.AdvertiseSourceMap = map[string]string{tt.source: tt.relay}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("invalid UDP advertise source mapping %q -> %q was accepted for bind %q", tt.source, tt.relay, tt.bindIP)
+		}
+	}
+
+	cfg := validUDPServerConfig()
+	cfg.UDP.BindIP = "0.0.0.0"
+	cfg.UDP.AdvertiseSourceMap = map[string]string{
+		"192.168.8.9":     "192.168.8.88",
+		"192.168.9.0/24":  "192.168.9.1",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid UDP advertise source map rejected: %v", err)
+	}
+	if got := cfg.UDP.AdvertiseSourceMap["192.168.8.9/32"]; got != "192.168.8.88" {
+		t.Fatalf("advertise source map single IP was not normalized to CIDR: %+v", cfg.UDP.AdvertiseSourceMap)
+	}
+	if got := cfg.UDP.AdvertiseSourceMap["192.168.9.0/24"]; got != "192.168.9.1" {
+		t.Fatalf("advertise source map CIDR was not preserved: %+v", cfg.UDP.AdvertiseSourceMap)
+	}
+}
+
 func validUDPServerConfig() Server {
 	return Server{
 		Name:      "udp-test",
