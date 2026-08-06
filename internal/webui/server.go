@@ -160,7 +160,7 @@ func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
 		"service_instance_id": s.started.UTC().Format(time.RFC3339Nano), "sampled_at": sampledAt,
 		"uptime_seconds": int64(time.Since(s.started).Seconds()), "servers": redactServerCredentials(configs), "instances": s.manager.Snapshots(), "heartbeats": heartbeats,
 		"vohive_events": vohiveEvents,
-		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC, "websocket_clients": s.websocketClients.Load()},
+		"process":       map[string]any{"goroutines": runtime.NumGoroutine(), "heap_bytes": mem.HeapAlloc, "heap_live_bytes": liveHeap, "sys_bytes": mem.Sys, "gc_cycles": mem.NumGC, "websocket_clients": s.websocketClients.Load()},
 	}, nil
 }
 
