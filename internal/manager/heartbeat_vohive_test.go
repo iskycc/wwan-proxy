@@ -38,9 +38,22 @@ func TestVohiveRecoveryTriggerRespectsThresholdAndCooldown(t *testing.T) {
 	waitForRecovery := func() {
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("recovery goroutine did not run")
 		}
+		// Wait for the goroutine to finish resetting vohiveInProgress so the
+		// cooldown check is deterministic under slow/race-enabled scheduling.
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			inst.mu.Lock()
+			inProgress := inst.vohiveInProgress
+			inst.mu.Unlock()
+			if !inProgress {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("recovery goroutine did not reset vohiveInProgress")
 	}
 
 	// Below threshold: no recovery.
