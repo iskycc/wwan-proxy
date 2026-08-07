@@ -35,18 +35,22 @@ jobs:
           test -x openwrt/wwan-proxy.init
           sh -n openwrt/wwan-proxy.init
 
-      - name: Validate Alpine installer and OpenRC files
+      - name: Validate installer and service files
         run: |
           test -x scripts/install-alpine.sh
           test -x scripts/install-dante-alpine.sh
+          test -x scripts/install-ubuntu.sh
           test -x scripts/test-alpine-firewall.sh
           test -x alpine/wwan-proxy.openrc
           sh -n scripts/install-alpine.sh
           sh -n scripts/install-dante-alpine.sh
+          bash -n scripts/install-ubuntu.sh
           bash -n scripts/test-alpine-firewall.sh
           sh -n alpine/wwan-proxy.openrc
           test -s alpine/wwan-proxy.confd
           test -s alpine/wwan-proxy.logrotate
+          grep --fixed-strings --line-regexp --quiet 'LimitNPROC=infinity' wwan-proxy.service
+          grep --fixed-strings --line-regexp --quiet 'TasksMax=infinity' wwan-proxy.service
 
       - name: Validate scripts with supported Alpine BusyBox ash
         run: |
@@ -135,7 +139,7 @@ jobs:
             ./cmd/wwan-proxy
           cp README.md wwan-proxy.service "${package_dir}/"
           cp openwrt/wwan-proxy.init "${package_dir}/"
-          cp scripts/install-alpine.sh scripts/install-dante-alpine.sh "${package_dir}/"
+          cp scripts/install-alpine.sh scripts/install-dante-alpine.sh scripts/install-ubuntu.sh "${package_dir}/"
           cp alpine/wwan-proxy.openrc alpine/wwan-proxy.confd alpine/wwan-proxy.logrotate "${package_dir}/"
           tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
 
@@ -149,7 +153,7 @@ jobs:
           tar -tzf "${archive}" > "${contents}"
           for expected in \
             wwan-proxy README.md wwan-proxy.service wwan-proxy.init \
-            install-alpine.sh install-dante-alpine.sh \
+            install-alpine.sh install-dante-alpine.sh install-ubuntu.sh \
             wwan-proxy.openrc wwan-proxy.confd wwan-proxy.logrotate
           do
             grep --fixed-strings --line-regexp --quiet "${PACKAGE_NAME}/${expected}" "${contents}"
@@ -230,6 +234,26 @@ jobs:
             exit 1
           fi
           file "${binary}" | grep --quiet 'statically linked'
+
+      - name: Smoke-test Ubuntu installer
+        if: matrix.package_name == 'wwan-proxy-linux-amd64-musl'
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            sha256sum "./${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.SHA256SUMS"
+          )
+          for ubuntu_version in 22.04 24.04 26.04; do
+            docker run --rm \
+              --volume "${PWD}:/workspace:ro" \
+              "ubuntu:${ubuntu_version}" \
+              bash /workspace/scripts/install-ubuntu.sh \
+                --archive "/workspace/dist/${PACKAGE_NAME}.tar.gz" \
+                --checksum "/workspace/dist/${PACKAGE_NAME}.SHA256SUMS" \
+                --no-start
+          done
 
       - name: Test Alpine nftables detection and opening
         if: matrix.libc == 'musl'

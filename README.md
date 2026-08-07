@@ -430,10 +430,46 @@ WebUI 使用以下同源接口：
 }
 ```
 
-## systemd
+## Ubuntu 22.04/24.04/26.04 一键安装
+
+在使用 systemd 的 Ubuntu amd64 或 arm64 主机上进入 root shell，或使用 `sudo bash`：
 
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin wwan-proxy
+curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-ubuntu.sh | sudo bash
+```
+
+安装器使用经过 `SHA256SUMS` 校验的静态 musl Release，不依赖宿主机 glibc 版本；它会创建 `wwan-proxy` 系统用户、保留并备份 SQLite 数据库、安装 systemd unit、启用服务并检查 `http://127.0.0.1:9090/api/health`。服务使用 `LimitNOFILE=65536`、`LimitNPROC=infinity` 和 `TasksMax=infinity`，同时只授予绑定出口网卡所需的 `CAP_NET_RAW`。
+
+WebUI 首次默认监听 `127.0.0.1:9090`，不会自动开放 UFW、nftables、云安全组或公网管理端口。建议通过 SSH 转发访问：
+
+```bash
+ssh -L 9090:127.0.0.1:9090 user@server
+```
+
+升级环境如果已经把 WebUI 改到其他端口，需要传入实际健康检查地址；无法从安装环境访问健康端点时也可以显式跳过：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-ubuntu.sh \
+  | sudo bash -s -- --health-url http://127.0.0.1:9191/api/health
+
+curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-ubuntu.sh \
+  | sudo bash -s -- --skip-health-check
+```
+
+固定路径：程序位于 `/usr/local/bin/wwan-proxy`，数据库位于 `/var/lib/wwan-proxy/wwan-proxy.db`，unit 位于 `/etc/systemd/system/wwan-proxy.service`，安装日志位于 `/var/log/wwan-proxy-install.log`，升级备份位于 `/var/backups/wwan-proxy/`。
+
+常用命令：
+
+```bash
+systemctl status wwan-proxy
+journalctl -u wwan-proxy -f
+```
+
+### 手动安装 systemd 服务
+
+```bash
+sudo groupadd --system wwan-proxy
+sudo useradd --system --gid wwan-proxy --no-create-home --shell /usr/sbin/nologin wwan-proxy
 sudo install -m 0755 wwan-proxy /usr/local/bin/wwan-proxy
 sudo install -m 0644 wwan-proxy.service /etc/systemd/system/wwan-proxy.service
 sudo systemctl daemon-reload
