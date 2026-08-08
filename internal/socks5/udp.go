@@ -48,6 +48,7 @@ type sourceAdvertiseEntry struct {
 type udpAssociation struct {
 	server    *Server
 	client    *net.UDPConn
+	upstream  *UpstreamUDPRelay
 	targetTTL time.Duration
 
 	mu             sync.RWMutex
@@ -59,6 +60,22 @@ type udpAssociation struct {
 	writeTarget    udpWriteFunc
 	wg             sync.WaitGroup
 	lastUnix       atomic.Int64
+	diagnostics    udpAssociationDiagnostics
+}
+
+type udpAssociationDiagnostics struct {
+	clientDatagrams     atomic.Uint64
+	uploadPackets       atomic.Uint64
+	downloadPackets     atomic.Uint64
+	clientSourceDrops   atomic.Uint64
+	fragmentDrops       atomic.Uint64
+	invalidDrops        atomic.Uint64
+	truncatedDrops      atomic.Uint64
+	queueDrops          atomic.Uint64
+	resolveDrops        atomic.Uint64
+	targetDenied        atomic.Uint64
+	responseSourceDrops atomic.Uint64
+	sendErrors          atomic.Uint64
 }
 
 // handleUDP remains as a compatibility wrapper for tests and embedders. The
@@ -127,6 +144,18 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 	}
 	defer clientConn.Close()
 	s.configureUDPBuffers(clientConn, "relay")
+	var upstreamRelay *UpstreamUDPRelay
+	if s.cfg.Upstream.Enabled {
+		upstreamCtx, upstreamCancel := context.WithTimeout(ctx, s.dialer().Timeout)
+		upstreamRelay, err = OpenUDPViaUpstream(upstreamCtx, s.cfg.Upstream, s.dialer(), s.resolver)
+		upstreamCancel()
+		if err != nil {
+			_ = writeReply(control, replyForError(err), nil)
+			return fmt.Errorf("open chained UDP relay: %w", err)
+		}
+		defer upstreamRelay.Close()
+		s.configureUDPBuffers(upstreamRelay.Packet, "upstream")
+	}
 
 	advertiseIP, err := s.udpAdvertiseIP(localTCP.IP, remoteTCP.IP)
 	if err != nil {
@@ -136,6 +165,9 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 	if (advertiseIP.To4() != nil) != bindIPv4 {
 		_ = writeReply(control, repAddressNotSupported, nil)
 		return fmt.Errorf("UDP relay advertise address family does not match bind address")
+	}
+	if isPublicUnicastIP(remoteTCP.IP) && !isPublicUnicastIP(advertiseIP) {
+		s.log.Warn("UDP relay may be unreachable from public client", "client", control.RemoteAddr(), "advertise_ip", advertiseIP, "control_local", localTCP.IP, "hint", "configure udp.advertise or udp.advertise_source_map for the public/NAT address")
 	}
 	relayPort := clientConn.LocalAddr().(*net.UDPAddr).Port
 	if err := writeReply(control, repSuccess, &net.UDPAddr{IP: advertiseIP, Port: relayPort}); err != nil {
@@ -150,6 +182,7 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 	assoc := &udpAssociation{
 		server:         s,
 		client:         clientConn,
+		upstream:       upstreamRelay,
 		targetTTL:      targetTTL,
 		allowedTargets: make(map[netip.AddrPort]*udpTargetGrant),
 	}
@@ -157,7 +190,7 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 	s.metrics.activeUDP.Add(1)
 	defer s.metrics.activeUDP.Add(-1)
 	defer assoc.close()
-	s.log.Debug("UDP ASSOCIATE", "client", control.RemoteAddr(), "relay", net.JoinHostPort(advertiseIP.String(), fmt.Sprint(relayPort)), "fixed_pool", len(fixedRelayPorts) != 0, "pool_size", len(fixedRelayPorts))
+	s.log.Debug("UDP ASSOCIATE", "client", control.RemoteAddr(), "relay", net.JoinHostPort(advertiseIP.String(), fmt.Sprint(relayPort)), "fixed_pool", len(fixedRelayPorts) != 0, "pool_size", len(fixedRelayPorts), "chained", upstreamRelay != nil)
 
 	// RFC 1928 ties the UDP association lifetime to this TCP control
 	// connection. Any EOF/error cancels queued DNS and closes the UDP socket.
@@ -166,10 +199,57 @@ func (s *Server) handleUDPContext(parent context.Context, control net.Conn, requ
 		_, _ = control.Read(one[:])
 		cancel()
 	}()
+	if upstreamRelay != nil {
+		go func() {
+			var one [1]byte
+			_, _ = upstreamRelay.Control.Read(one[:])
+			cancel()
+		}()
+	}
 	defer func() { _ = control.SetReadDeadline(time.Now()) }()
 	stopClose := context.AfterFunc(ctx, func() { _ = clientConn.Close() })
 	defer stopClose()
-	return assoc.loop(ctx, idle)
+	startedAt := time.Now()
+	err = assoc.loop(ctx, idle)
+	s.logUDPAssociationSummary(control.RemoteAddr(), startedAt, &assoc.diagnostics, upstreamRelay != nil, err)
+	return err
+}
+
+func (s *Server) logUDPAssociationSummary(client net.Addr, startedAt time.Time, diagnostics *udpAssociationDiagnostics, chained bool, loopErr error) {
+	clientDatagrams := diagnostics.clientDatagrams.Load()
+	clientSourceDrops := diagnostics.clientSourceDrops.Load()
+	fragmentDrops := diagnostics.fragmentDrops.Load()
+	invalidDrops := diagnostics.invalidDrops.Load()
+	truncatedDrops := diagnostics.truncatedDrops.Load()
+	queueDrops := diagnostics.queueDrops.Load()
+	resolveDrops := diagnostics.resolveDrops.Load()
+	targetDenied := diagnostics.targetDenied.Load()
+	responseSourceDrops := diagnostics.responseSourceDrops.Load()
+	sendErrors := diagnostics.sendErrors.Load()
+	fields := []any{
+		"client", client, "duration", time.Since(startedAt).Round(time.Millisecond), "chained", chained,
+		"client_datagrams", clientDatagrams,
+		"upload_packets", diagnostics.uploadPackets.Load(),
+		"download_packets", diagnostics.downloadPackets.Load(),
+		"client_source_drops", clientSourceDrops,
+		"fragment_drops", fragmentDrops,
+		"invalid_drops", invalidDrops,
+		"truncated_drops", truncatedDrops,
+		"queue_drops", queueDrops,
+		"resolve_drops", resolveDrops,
+		"target_denied", targetDenied,
+		"response_source_drops", responseSourceDrops,
+		"send_errors", sendErrors,
+	}
+	drops := clientSourceDrops + fragmentDrops + invalidDrops + truncatedDrops + queueDrops + resolveDrops + targetDenied + responseSourceDrops + sendErrors
+	if loopErr != nil {
+		fields = append(fields, "error", loopErr)
+	}
+	if drops != 0 || loopErr != nil || clientDatagrams == 0 {
+		s.log.Warn("UDP association ended with diagnostics", fields...)
+		return
+	}
+	s.log.Debug("UDP association ended", fields...)
 }
 
 func (s *Server) validateUDPClient(parent context.Context, requested address, peerIP net.IP) error {
@@ -465,6 +545,10 @@ func (a *udpAssociation) loop(parent context.Context, idle time.Duration) error 
 		}()
 	}
 	stopClose := context.AfterFunc(ctx, a.closeSockets)
+	if a.upstream != nil {
+		a.wg.Add(1)
+		go a.readUpstreamResponses()
+	}
 	defer func() {
 		cancel()
 		close(jobs)
@@ -500,18 +584,23 @@ func (a *udpAssociation) loop(parent context.Context, idle time.Duration) error 
 		}
 		if flags&syscall.MSG_TRUNC != 0 {
 			a.server.metrics.udpTruncatedDrops.Add(1)
+			a.diagnostics.truncatedDrops.Add(1)
 			continue
 		}
 		if !a.acceptClient(from) {
 			a.server.metrics.udpClientSourceDrops.Add(1)
+			a.diagnostics.clientSourceDrops.Add(1)
 			continue
 		}
+		a.diagnostics.clientDatagrams.Add(1)
 		dst, payload, err := parseUDPDatagram(buf[:n])
 		if err != nil {
 			if errors.Is(err, errFragmentedUDP) {
 				a.server.metrics.udpFragmentDrops.Add(1)
+				a.diagnostics.fragmentDrops.Add(1)
 			} else {
 				a.server.metrics.udpInvalidDrops.Add(1)
+				a.diagnostics.invalidDrops.Add(1)
 			}
 			continue
 		}
@@ -520,6 +609,7 @@ func (a *udpAssociation) loop(parent context.Context, idle time.Duration) error 
 		// high-rate allocation/GC denial of service.
 		if len(jobs) >= cap(jobs) {
 			a.server.metrics.udpQueueDrops.Add(1)
+			a.diagnostics.queueDrops.Add(1)
 			continue
 		}
 		job := udpRequest{dst: dst, payload: append([]byte(nil), payload...)}
@@ -529,6 +619,7 @@ func (a *udpAssociation) loop(parent context.Context, idle time.Duration) error 
 			return nil
 		default:
 			a.server.metrics.udpQueueDrops.Add(1)
+			a.diagnostics.queueDrops.Add(1)
 		}
 	}
 }
@@ -541,8 +632,10 @@ func (a *udpAssociation) forward(ctx context.Context, job udpRequest) {
 	if err != nil {
 		if errors.Is(err, policy.ErrTargetDenied) {
 			a.server.metrics.targetDenied.Add(1)
+			a.diagnostics.targetDenied.Add(1)
 		} else if ctx.Err() == nil {
 			a.server.metrics.udpResolveDrops.Add(1)
+			a.diagnostics.resolveDrops.Add(1)
 		}
 		return
 	}
@@ -557,25 +650,102 @@ func (a *udpAssociation) sendToTargets(ctx context.Context, payload []byte, targ
 		if ctx.Err() != nil {
 			return false
 		}
-		out, outboundErr := a.outbound(ctx, target.IP.To4() != nil)
-		if outboundErr != nil {
-			continue
-		}
 		grant := a.beginTargetGrant(target)
-		_, sendErr := a.writeToTarget(out, payload, target)
+		var sendErr error
+		if a.upstream != nil {
+			packet := makeUDPDatagram(target, payload)
+			_, sendErr = a.upstream.Packet.WriteToUDP(packet, a.upstream.Relay)
+		} else {
+			out, outboundErr := a.outbound(ctx, target.IP.To4() != nil)
+			if outboundErr != nil {
+				a.finishTargetGrant(grant, false)
+				continue
+			}
+			_, sendErr = a.writeToTarget(out, payload, target)
+		}
 		a.finishTargetGrant(grant, sendErr == nil)
 		if sendErr != nil {
 			continue
 		}
 		a.server.metrics.udpUploadPackets.Add(1)
 		a.server.metrics.udpUploadBytes.Add(uint64(len(payload)))
+		a.diagnostics.uploadPackets.Add(1)
 		a.lastUnix.Store(time.Now().UnixNano())
 		return true
 	}
 	if ctx.Err() == nil {
 		a.server.metrics.udpSendErrors.Add(1)
+		a.diagnostics.sendErrors.Add(1)
 	}
 	return false
+}
+
+func (a *udpAssociation) readUpstreamResponses() {
+	defer a.wg.Done()
+	buf := make([]byte, udpReadBufferSize)
+	for {
+		n, _, flags, outerSource, err := a.upstream.Packet.ReadMsgUDP(buf, nil)
+		if err != nil {
+			return
+		}
+		if flags&syscall.MSG_TRUNC != 0 {
+			a.server.metrics.udpTruncatedDrops.Add(1)
+			a.diagnostics.truncatedDrops.Add(1)
+			continue
+		}
+		if !sameUDPEndpoint(outerSource, a.upstream.Relay) {
+			a.server.metrics.udpResponseSourceDrops.Add(1)
+			a.diagnostics.responseSourceDrops.Add(1)
+			continue
+		}
+		source, payload, err := parseUDPDatagram(buf[:n])
+		if err != nil {
+			if errors.Is(err, errFragmentedUDP) {
+				a.server.metrics.udpFragmentDrops.Add(1)
+				a.diagnostics.fragmentDrops.Add(1)
+			} else {
+				a.server.metrics.udpInvalidDrops.Add(1)
+				a.diagnostics.invalidDrops.Add(1)
+			}
+			continue
+		}
+		ip := net.ParseIP(source.Host)
+		if ip == nil {
+			a.server.metrics.udpInvalidDrops.Add(1)
+			a.diagnostics.invalidDrops.Add(1)
+			continue
+		}
+		target := &net.UDPAddr{IP: ip, Port: int(source.Port)}
+		if !a.targetAllowed(target, time.Now()) {
+			a.server.metrics.udpResponseSourceDrops.Add(1)
+			a.diagnostics.responseSourceDrops.Add(1)
+			continue
+		}
+		a.deliverResponse(target, payload)
+	}
+}
+
+func sameUDPEndpoint(a, b *net.UDPAddr) bool {
+	return a != nil && b != nil && a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
+}
+
+func (a *udpAssociation) deliverResponse(from *net.UDPAddr, payload []byte) {
+	a.mu.RLock()
+	clientAt := cloneUDPAddr(a.clientAt)
+	a.mu.RUnlock()
+	if clientAt == nil {
+		return
+	}
+	packet := makeUDPDatagram(from, payload)
+	if _, err := a.client.WriteToUDP(packet, clientAt); err != nil {
+		a.server.metrics.udpSendErrors.Add(1)
+		a.diagnostics.sendErrors.Add(1)
+		return
+	}
+	a.server.metrics.udpDownloadPackets.Add(1)
+	a.server.metrics.udpDownloadBytes.Add(uint64(len(payload)))
+	a.diagnostics.downloadPackets.Add(1)
+	a.lastUnix.Store(time.Now().UnixNano())
 }
 
 func (a *udpAssociation) writeToTarget(conn *net.UDPConn, payload []byte, target *net.UDPAddr) (int, error) {
@@ -699,26 +869,15 @@ func (a *udpAssociation) readResponses(conn *net.UDPConn) {
 		}
 		if flags&syscall.MSG_TRUNC != 0 {
 			a.server.metrics.udpTruncatedDrops.Add(1)
+			a.diagnostics.truncatedDrops.Add(1)
 			continue
 		}
 		if !a.targetAllowed(from, time.Now()) {
 			a.server.metrics.udpResponseSourceDrops.Add(1)
+			a.diagnostics.responseSourceDrops.Add(1)
 			continue
 		}
-		a.mu.RLock()
-		clientAt := cloneUDPAddr(a.clientAt)
-		a.mu.RUnlock()
-		if clientAt == nil {
-			continue
-		}
-		packet := makeUDPDatagram(from, buf[:n])
-		if _, err := a.client.WriteToUDP(packet, clientAt); err != nil {
-			a.server.metrics.udpSendErrors.Add(1)
-			continue
-		}
-		a.server.metrics.udpDownloadPackets.Add(1)
-		a.server.metrics.udpDownloadBytes.Add(uint64(n))
-		a.lastUnix.Store(time.Now().UnixNano())
+		a.deliverResponse(from, buf[:n])
 	}
 }
 
@@ -854,6 +1013,9 @@ func (a *udpAssociation) closeSockets() {
 		_ = a.client.Close()
 	}
 	a.mu.Lock()
+	if a.upstream != nil {
+		_ = a.upstream.Close()
+	}
 	if a.out4 != nil {
 		_ = a.out4.Close()
 	}

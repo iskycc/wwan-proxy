@@ -11,11 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"wwan-proxy/internal/config"
+	"wwan-proxy/internal/netrelay"
 	"wwan-proxy/internal/policy"
 	"wwan-proxy/internal/proxyauth"
 )
@@ -307,10 +307,6 @@ func (s *Server) handle(c net.Conn) error {
 			_ = writeReply(c, repCommandNotSupported, nil)
 			return fmt.Errorf("UDP ASSOCIATE disabled")
 		}
-		if s.cfg.Upstream.Enabled {
-			_ = writeReply(c, repCommandNotSupported, nil)
-			return fmt.Errorf("UDP ASSOCIATE not supported with upstream proxy")
-		}
 		s.metrics.udpAssociations.Add(1)
 		return s.handleUDPContext(s.ctx, c, dst)
 	default:
@@ -433,11 +429,26 @@ func (s *Server) dialContext(parent context.Context, network, address string, en
 		if err != nil || portNumber < 1 || portNumber > 65535 {
 			return nil, fmt.Errorf("invalid target port %q", port)
 		}
-		if enforceAccess && s.access != nil {
+		if enforceAccess && s.access != nil && (len(s.cfg.Access.TargetRules) != 0 || s.cfg.Access.TargetDefault == "deny") {
 			literalHost, _ := splitIPZone(host)
 			if ip := net.ParseIP(literalHost); ip != nil {
 				if !s.access.AllowTarget(host, ip, portNumber) {
 					return nil, fmt.Errorf("%w: %s", policy.ErrTargetDenied, address)
+				}
+			} else {
+				lookupCtx, lookupCancel := context.WithTimeout(ctx, s.dialer().Timeout)
+				ips, lookupErr := s.lookupTargetIPs(lookupCtx, network, host)
+				lookupCancel()
+				if lookupErr != nil {
+					return nil, fmt.Errorf("lookup %s for chained target policy: %w", host, lookupErr)
+				}
+				if len(ips) == 0 {
+					return nil, fmt.Errorf("lookup %s for chained target policy: no address", host)
+				}
+				for _, ip := range ips {
+					if !s.access.AllowTarget(host, ip.IP, portNumber) {
+						return nil, fmt.Errorf("%w: %s resolved to denied address %s", policy.ErrTargetDenied, address, ip.String())
+					}
 				}
 			}
 		}
@@ -631,65 +642,7 @@ func (s *Server) handleConnect(client net.Conn, dst address) error {
 }
 
 func (s *Server) relayTCP(a, b net.Conn, idle time.Duration) error {
-	a = &deadlineConn{Conn: a, idle: idle}
-	b = &deadlineConn{Conn: b, idle: idle}
-	errCh := make(chan error, 2)
-	copyOne := func(dst, src net.Conn, counter *atomic.Uint64) {
-		_, err := io.Copy(&atomicCountingWriter{Writer: dst, counter: counter}, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-		errCh <- err
-	}
-	go copyOne(a, b, &s.metrics.tcpDownloadBytes)
-	go copyOne(b, a, &s.metrics.tcpUploadBytes)
-	first := <-errCh
-	if first != nil {
-		_ = a.Close()
-		_ = b.Close()
-	}
-	second := <-errCh
-	_ = a.Close()
-	_ = b.Close()
-	if first != nil {
-		return first
-	}
-	return second
-}
-
-// atomicCountingWriter records bytes after every successful write so live
-// metrics move while a stream is active instead of jumping when io.Copy ends.
-type atomicCountingWriter struct {
-	io.Writer
-	counter *atomic.Uint64
-}
-
-func (w *atomicCountingWriter) Write(p []byte) (int, error) {
-	n, err := w.Writer.Write(p)
-	if n > 0 {
-		w.counter.Add(uint64(n))
-	}
-	return n, err
-}
-
-type deadlineConn struct {
-	net.Conn
-	idle time.Duration
-}
-
-func (c *deadlineConn) Read(p []byte) (int, error) {
-	_ = c.SetReadDeadline(time.Now().Add(c.idle))
-	return c.Conn.Read(p)
-}
-func (c *deadlineConn) Write(p []byte) (int, error) {
-	_ = c.SetWriteDeadline(time.Now().Add(c.idle))
-	return c.Conn.Write(p)
-}
-func (c *deadlineConn) CloseWrite() error {
-	if x, ok := c.Conn.(interface{ CloseWrite() error }); ok {
-		return x.CloseWrite()
-	}
-	return nil
+	return netrelay.Bidirectional(a, b, idle, &s.metrics.tcpUploadBytes, &s.metrics.tcpDownloadBytes)
 }
 
 func replyForError(err error) byte {

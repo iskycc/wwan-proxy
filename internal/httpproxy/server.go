@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"wwan-proxy/internal/config"
+	"wwan-proxy/internal/netrelay"
 	"wwan-proxy/internal/policy"
 	"wwan-proxy/internal/proxyauth"
 )
@@ -532,23 +533,7 @@ type bufferedConn struct {
 }
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
-
-type deadlineConn struct {
-	net.Conn
-	idle time.Duration
-}
-
-func (c *deadlineConn) Read(p []byte) (int, error) {
-	_ = c.SetReadDeadline(time.Now().Add(c.idle))
-	return c.Conn.Read(p)
-}
-
-func (c *deadlineConn) Write(p []byte) (int, error) {
-	_ = c.SetWriteDeadline(time.Now().Add(c.idle))
-	return c.Conn.Write(p)
-}
-
-func (c *deadlineConn) CloseWrite() error {
+func (c *bufferedConn) CloseWrite() error {
 	if closer, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return closer.CloseWrite()
 	}
@@ -556,28 +541,7 @@ func (c *deadlineConn) CloseWrite() error {
 }
 
 func relayTCP(client, upstream net.Conn, idle time.Duration, upload, download *atomic.Uint64) error {
-	client = &deadlineConn{Conn: client, idle: idle}
-	upstream = &deadlineConn{Conn: upstream, idle: idle}
-	errCh := make(chan error, 2)
-	copyOne := func(dst, src net.Conn, counter *atomic.Uint64) {
-		_, err := io.Copy(&atomicCountingWriter{Writer: dst, counter: counter}, src)
-		if closer, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = closer.CloseWrite()
-		}
-		errCh <- err
-	}
-	go copyOne(upstream, client, upload)
-	go copyOne(client, upstream, download)
-	first := <-errCh
-	if first != nil {
-		_ = client.Close()
-		_ = upstream.Close()
-	}
-	second := <-errCh
-	if first != nil {
-		return first
-	}
-	return second
+	return netrelay.Bidirectional(client, upstream, idle, upload, download)
 }
 
 func normalClose(err error) bool {

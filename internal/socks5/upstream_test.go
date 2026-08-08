@@ -2,6 +2,7 @@ package socks5
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ func startTestUpstream(t *testing.T, users map[string]string) (string, func()) {
 	cfg := config.Server{
 		Name: "upstream", Listen: "127.0.0.1:0", Interface: "lo",
 		Auth: config.Auth{Method: "none"},
+		UDP:  config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto", IdleTimeout: config.Duration(3 * time.Second), MaxAssociations: 16},
 	}
 	if len(users) > 0 {
 		cfg.Auth.Method = "username_password"
@@ -127,6 +129,87 @@ func TestDialViaUpstreamSuccess(t *testing.T) {
 	}
 }
 
+func TestUDPAssociateViaUpstream(t *testing.T) {
+	echo, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, readErr := echo.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			_, _ = echo.WriteToUDP(buf[:n], from)
+		}
+	}()
+
+	upstreamAddress, cleanup := startTestUpstream(t, nil)
+	defer cleanup()
+	downstream := New(config.Server{
+		Name: "downstream", Interface: "lo", ConnectTimeout: config.Duration(2 * time.Second),
+		Auth:     config.Auth{Method: "none"},
+		UDP:      config.UDP{Enabled: true, BindIP: "127.0.0.1", Advertise: "auto", IdleTimeout: config.Duration(3 * time.Second), MaxAssociations: 16},
+		Upstream: config.Upstream{Enabled: true, Address: upstreamAddress, AuthMethod: "none"},
+	}, testLogger(t))
+	control, done := runHandler(t, downstream)
+	defer control.Close()
+	greet(t, control)
+	request(t, control, cmdUDPAssociate, net.IPv4zero, 0)
+	relay := readSuccessReply(t, control)
+
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	payload := []byte("chained-wifi-calling")
+	if _, err := client.WriteToUDP(udpTestPacket(echo.LocalAddr().(*net.UDPAddr), payload), relay); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	n, _, err := client.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, got, err := parseUDPDatagram(buf[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if from.Port != uint16(echo.LocalAddr().(*net.UDPAddr).Port) || string(got) != string(payload) {
+		t.Fatalf("response from=%v payload=%q", from, got)
+	}
+	_ = control.Close()
+	select {
+	case err := <-done:
+		if err != nil && !isNormalClose(err) {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("chained UDP association did not stop")
+	}
+}
+
+func TestOpenUDPViaAuthenticatedUpstream(t *testing.T) {
+	upstreamAddress, cleanup := startTestUpstream(t, map[string]string{"alice": "secret"})
+	defer cleanup()
+	relay, err := OpenUDPViaUpstream(context.Background(), config.Upstream{
+		Enabled: true, Address: upstreamAddress, AuthMethod: "username_password", Username: "alice", Password: "secret",
+	}, &net.Dialer{Timeout: 2 * time.Second}, net.DefaultResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relay.Control == nil || relay.Packet == nil || relay.Relay == nil || relay.Relay.Port == 0 {
+		t.Fatalf("incomplete upstream UDP relay: %+v", relay)
+	}
+	if err := relay.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatal(err)
+	}
+}
+
 func TestDialViaUpstreamTargetAddressValidation(t *testing.T) {
 	upstream := config.Upstream{Enabled: true, Address: "127.0.0.1:1080", AuthMethod: "none"}
 	_, err := DialViaUpstream(context.Background(), upstream, &net.Dialer{Timeout: time.Second}, "tcp", "not-an-address")
@@ -146,4 +229,3 @@ func TestDialViaUpstreamDisabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-

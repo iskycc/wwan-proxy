@@ -67,6 +67,21 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatalf("initialize status=%v err=%v body=%s", resp.StatusCode, err, b)
 	}
 	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/api/auth/status")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated status=%v err=%v", resp.StatusCode, err)
+	}
+	var authenticatedStatus struct {
+		Authenticated bool      `json:"authenticated"`
+		ExpiresAt     time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&authenticatedStatus); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if !authenticatedStatus.Authenticated || time.Until(authenticatedStatus.ExpiresAt) < 23*time.Hour {
+		t.Fatalf("unexpected authenticated status: %+v", authenticatedStatus)
+	}
 
 	resp, err = client.Get(ts.URL + "/api/interfaces")
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -150,6 +165,17 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatalf("save settings status=%v err=%v body=%s", resp.StatusCode, err, b)
 	}
 	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/api/auth/status")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("post-policy auth status=%v err=%v", resp.StatusCode, err)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&authenticatedStatus); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if remaining := time.Until(authenticatedStatus.ExpiresAt); remaining < 47*time.Hour || remaining > 49*time.Hour {
+		t.Fatalf("existing session did not adopt 48h policy: remaining=%v", remaining)
+	}
 
 	adminBody := []byte(`{"username":"administrator","current_password":"StrongPassword!42","new_password":""}`)
 	adminRequest, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/admin", bytes.NewReader(adminBody))

@@ -98,7 +98,7 @@
         </div>
         <div class="panel glass-card chart-panel">
           <div class="panel-head"><div><p class="eyebrow">LIVE THROUGHPUT</p><h3>实时吞吐趋势</h3></div><div class="chart-tools"><span>最近 5 分钟 · WebSocket 推送</span><div class="legend"><span><i class="blue"></i>上传</span><span><i class="purple"></i>下载</span></div></div></div>
-          <canvas id="traffic-chart" height="260"></canvas>
+          <div class="chart-canvas-wrap live-chart-wrap"><canvas id="traffic-chart" role="img" aria-label="最近五分钟实时上传和下载吞吐趋势"></canvas></div>
         </div>
         <div class="panel glass-card"><div class="panel-head"><div><p class="eyebrow">RUNTIME</p><h3>进程性能</h3></div></div><div class="runtime-grid" id="runtime-grid"></div></div>
       </section>
@@ -137,17 +137,17 @@
             <article class="metric-card"><span>成功率</span><strong id="stats-success">—</strong></article>
           </div>
           <div class="stats-charts">
-            <div class="panel glass-card chart-panel">
-              <div class="panel-head"><div><p class="eyebrow">TRAFFIC</p><h3>流量趋势</h3></div></div>
-              <canvas id="stats-traffic-chart" height="240"></canvas>
+            <div class="panel glass-card chart-panel chart-wide">
+              <div class="panel-head"><div><p class="eyebrow">TRAFFIC</p><h3>流量趋势</h3></div><div class="chart-tools"><span id="stats-traffic-caption">按时间桶统计</span><div class="legend"><span><i class="blue"></i>上传</span><span><i class="purple"></i>下载</span></div></div></div>
+              <div class="chart-canvas-wrap"><canvas id="stats-traffic-chart" role="img" aria-label="历史上传和下载流量趋势"></canvas></div>
             </div>
             <div class="panel glass-card chart-panel">
-              <div class="panel-head"><div><p class="eyebrow">LATENCY</p><h3>延迟趋势</h3></div></div>
-              <canvas id="stats-latency-chart" height="240"></canvas>
+              <div class="panel-head"><div><p class="eyebrow">LATENCY</p><h3>延迟趋势</h3></div><div class="legend"><span><i class="orange"></i>心跳延迟</span></div></div>
+              <div class="chart-canvas-wrap"><canvas id="stats-latency-chart" role="img" aria-label="历史心跳延迟趋势"></canvas></div>
             </div>
             <div class="panel glass-card chart-panel">
-              <div class="panel-head"><div><p class="eyebrow">SUCCESS RATE</p><h3>成功率趋势</h3></div></div>
-              <canvas id="stats-success-chart" height="240"></canvas>
+              <div class="panel-head"><div><p class="eyebrow">SUCCESS RATE</p><h3>成功率趋势</h3></div><div class="legend"><span><i class="green"></i>成功率</span></div></div>
+              <div class="chart-canvas-wrap"><canvas id="stats-success-chart" role="img" aria-label="历史代理成功率趋势"></canvas></div>
             </div>
           </div>
         </div>
@@ -157,13 +157,13 @@
         <div class="settings-layout">
           <form class="panel glass-card settings-panel" id="system-settings-form">
             <div class="panel-head"><div><p class="eyebrow">SYSTEM SETTINGS</p><h3>系统设置</h3></div><span class="settings-badge" id="restart-badge">即时生效</span></div>
-            <p class="settings-copy">日志和新会话时长保存后立即生效；监听地址与数据库位置将在安全重启后生效。</p>
+            <p class="settings-copy">日志和会话时长保存后立即生效；监听地址与数据库位置将在安全重启后生效。</p>
             <div class="settings-fields">
               <label>WebUI 监听地址<input required name="web_listen" placeholder="127.0.0.1:9090"><small>修改后需要重启服务</small></label>
               <label>SQLite 数据库路径<input required name="database_path" placeholder="/var/lib/wwan-proxy/wwan-proxy.db"><small id="database-path-note">必须使用绝对路径，重启时自动迁移</small></label>
               <label>最低日志级别<select class="native-select" required name="log_level"><option value="WARN">WARN · 仅警告和错误（推荐）</option><option value="ERROR">ERROR · 仅错误</option><option value="INFO">INFO · 常规运行信息</option><option value="DEBUG">DEBUG · 完整诊断</option></select><small>即时过滤控制台与 SQLite，默认 WARN</small></label>
               <label>日志保留天数<input required type="number" min="1" max="3650" name="log_retention_days"><small>保存后立即执行过期清理</small></label>
-              <label>登录会话有效期<input required name="session_lifetime" placeholder="24h"><small>适用于之后创建的新会话</small></label>
+              <label>登录会话有效期<input required name="session_lifetime" placeholder="24h"><small>保存后按登录时间重新计算全部会话，已过期设备会立即退出</small></label>
             </div>
 
             <div class="vohive-section" id="vohive-settings-panel">
@@ -184,7 +184,7 @@
             <div class="panel-actions"><span></span><button class="primary-button" type="submit">保存系统设置</button></div>
           </form>
 
-          <form class="panel glass-card settings-panel" id="admin-settings-form">
+          <form class="panel glass-card settings-panel admin-settings-panel" id="admin-settings-form">
             <div class="panel-head"><div><p class="eyebrow">ADMINISTRATOR</p><h3>管理员安全</h3></div><span class="security-mark">安全</span></div>
             <p class="settings-copy">修改凭据后会保留当前浏览器，并立即撤销其他所有登录会话。</p>
             <div class="settings-fields one-column">
@@ -224,7 +224,7 @@
         <label class="toggle-label"><input type="checkbox" name="bind_enabled"><span></span>启用 SOCKS5 BIND（默认关闭）</label>
 	        <label class="bind-field">SOCKS5 BIND 超时<input name="bind_timeout" value="2m"></label>
 	        <label class="bind-field">BIND 广播 IP<input name="bind_advertise" value="auto"><small>auto 优先选择网口的全局单播地址；多地址或 NAT 环境可显式填写。</small></label>
-        <div class="form-section-heading span-2"><i>01b</i><div><strong>上游代理</strong><span>链式 SOCKS5 上游；启用后 BIND 与 UDP ASSOCIATE 不可用</span></div></div>
+        <div class="form-section-heading span-2"><i>01b</i><div><strong>上游代理</strong><span>TCP 与 UDP 均可通过链式 SOCKS5 上游；BIND 暂不支持链式转发</span></div></div>
         <label class="toggle-label span-2"><input type="checkbox" name="upstream_enabled"><span></span>启用上游 SOCKS5 代理</label>
         <label class="upstream-field">上游地址<input name="upstream_address" placeholder="10.0.0.1:1080"><small>上级 SOCKS5 监听地址，流量经本出口网口转发到该地址</small></label>
         <label class="upstream-field">上游认证方式<select class="native-select" name="upstream_auth_method"><option value="none">无需认证</option><option value="username_password">用户名 / 密码</option></select></label>

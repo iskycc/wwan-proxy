@@ -70,20 +70,29 @@ func (s *Store) CreateSession(ctx context.Context, tokenHash, remoteAddr, userAg
 }
 
 func (s *Store) ValidateSession(ctx context.Context, tokenHash string, now time.Time) (string, bool, error) {
+	username, _, valid, err := s.ValidateSessionExpiry(ctx, tokenHash, now)
+	return username, valid, err
+}
+
+// ValidateSessionExpiry validates a session and returns its absolute expiry.
+// Keeping the expiry in the response lets WebUI clients enforce the same
+// deadline locally instead of remaining visually unlocked until their next API
+// request.
+func (s *Store) ValidateSessionExpiry(ctx context.Context, tokenHash string, now time.Time) (string, time.Time, bool, error) {
 	var username, expiry string
 	err := s.db.QueryRowContext(ctx, `SELECT a.username,s.expires_at FROM web_sessions s JOIN admin_users a ON a.id=s.admin_id WHERE s.token_hash=?`, tokenHash).Scan(&username, &expiry)
 	if err == sql.ErrNoRows {
-		return "", false, nil
+		return "", time.Time{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return "", time.Time{}, false, err
 	}
 	expires, err := time.Parse(time.RFC3339Nano, expiry)
 	if err != nil || !expires.After(now) {
 		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM web_sessions WHERE token_hash=?`, tokenHash)
-		return "", false, nil
+		return "", time.Time{}, false, nil
 	}
-	return username, true, nil
+	return username, expires, true, nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
@@ -119,4 +128,53 @@ func (s *Store) DeleteOtherSessions(ctx context.Context, keepTokenHash string) e
 func (s *Store) PruneSessions(ctx context.Context, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM web_sessions WHERE expires_at <= ?`, now.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// ApplySessionLifetime recalculates every existing session from its original
+// login time. A changed administrator policy therefore takes effect
+// immediately for already logged-in devices as well as future logins.
+func (s *Store) ApplySessionLifetime(ctx context.Context, now time.Time, lifetime time.Duration) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT token_hash,created_at FROM web_sessions`)
+	if err != nil {
+		return err
+	}
+	type update struct {
+		token  string
+		expiry time.Time
+		valid  bool
+	}
+	var updates []update
+	for rows.Next() {
+		var token, createdRaw string
+		if err := rows.Scan(&token, &createdRaw); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		created, parseErr := time.Parse(time.RFC3339Nano, createdRaw)
+		expiry := created.Add(lifetime)
+		updates = append(updates, update{token: token, expiry: expiry, valid: parseErr == nil && expiry.After(now)})
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range updates {
+		if !item.valid {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM web_sessions WHERE token_hash=?`, item.token); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE web_sessions SET expires_at=? WHERE token_hash=?`, item.expiry.UTC().Format(time.RFC3339Nano), item.token); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

@@ -412,7 +412,7 @@ SOURCE_UNIT="${PACKAGE_ROOT}/wwan-proxy.service"
 "${SOURCE_BINARY}" -version >/dev/null || fatal "release binary cannot run on Ubuntu ${OS_VERSION}/${dpkg_arch}"
 grep -Fqx 'User=wwan-proxy' "${SOURCE_UNIT}" || fatal "packaged unit has an unexpected service user"
 grep -Fqx 'Group=wwan-proxy' "${SOURCE_UNIT}" || fatal "packaged unit has an unexpected service group"
-grep -Fqx 'ExecStart=/usr/local/bin/wwan-proxy -db /var/lib/wwan-proxy/wwan-proxy.db' "${SOURCE_UNIT}" || fatal "packaged unit has an unexpected ExecStart"
+grep -Fqx 'ExecStart=/usr/local/bin/wwan-proxy -db /var/lib/wwan-proxy/wwan-proxy.db -web-default 0.0.0.0:9090' "${SOURCE_UNIT}" || fatal "packaged unit has an unexpected ExecStart"
 grep -Fqx 'AmbientCapabilities=CAP_NET_RAW' "${SOURCE_UNIT}" || fatal "packaged unit does not grant CAP_NET_RAW"
 grep -Fqx 'LimitNOFILE=65536' "${SOURCE_UNIT}" || fatal "packaged unit does not set LimitNOFILE=65536"
 grep -Fqx 'LimitNPROC=infinity' "${SOURCE_UNIT}" || fatal "packaged unit does not remove LimitNPROC"
@@ -502,6 +502,12 @@ else
 	fi
 	SUCCESS=1
 	log INFO "service is active and enabled; health_url=${HEALTH_URL} health_skipped=${SKIP_HEALTH}"
+	if [[ "${HAD_DATABASE}" -eq 0 ]]; then
+		log WARN "first-run WebUI listens on 0.0.0.0:9090; initialize the administrator immediately and restrict TCP/9090 to a trusted management network"
+		log INFO "open WebUI at http://<ubuntu-host-ip>:9090 (the local health probe remains ${HEALTH_URL})"
+	else
+		log INFO "existing SQLite WebUI listener was preserved; 0.0.0.0:9090 is used only when no listener has been saved"
+	fi
 fi
 
 installed_version=$("${INSTALL_BINARY}" -version 2>&1 | head -n 1)

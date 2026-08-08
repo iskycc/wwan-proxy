@@ -40,8 +40,12 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "check administrator initialization", err)
 		return
 	}
-	username, authenticated := s.sessionUser(r)
-	writeJSON(w, http.StatusOK, map[string]any{"initialized": initialized, "authenticated": authenticated, "username": username})
+	username, expiresAt, authenticated := s.session(r)
+	status := map[string]any{"initialized": initialized, "authenticated": authenticated, "username": username}
+	if authenticated {
+		status["expires_at"] = expiresAt
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) initializeAdmin(w http.ResponseWriter, r *http.Request) {
@@ -67,12 +71,13 @@ func (s *Server) initializeAdmin(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "create administrator", err)
 		return
 	}
-	if err := s.issueSession(w, r); err != nil {
+	expiresAt, err := s.issueSession(w, r)
+	if err != nil {
 		s.internalError(w, r, "create initial session", err)
 		return
 	}
 	s.log.Info("administrator initialized", "username", strings.TrimSpace(req.Username), "remote", clientIP(r))
-	writeJSON(w, http.StatusCreated, map[string]any{"authenticated": true, "username": strings.TrimSpace(req.Username)})
+	writeJSON(w, http.StatusCreated, map[string]any{"authenticated": true, "username": strings.TrimSpace(req.Username), "expires_at": expiresAt})
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -102,12 +107,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.limiter.success(ip)
-	if err := s.issueSession(w, r); err != nil {
+	expiresAt, err := s.issueSession(w, r)
+	if err != nil {
 		s.internalError(w, r, "create login session", err)
 		return
 	}
 	s.log.Info("WebUI login succeeded", "username", admin.Username, "remote", ip)
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": admin.Username})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": admin.Username, "expires_at": expiresAt})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -119,15 +125,15 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) issueSession(w http.ResponseWriter, r *http.Request) error {
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request) (time.Time, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return err
+		return time.Time{}, err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	settings, err := s.store.SystemSettings(r.Context())
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	lifetime := settings.SessionLifetime.Value(24 * time.Hour)
 	expires := time.Now().Add(lifetime)
@@ -136,10 +142,30 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request) error {
 		ua = ua[:512]
 	}
 	if err := s.store.CreateSession(r.Context(), hashToken(token), clientIP(r), ua, expires); err != nil {
-		return err
+		return time.Time{}, err
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: token, Path: "/", Expires: expires, MaxAge: int(lifetime.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
-	return nil
+	return expires, nil
+}
+
+// refreshSessionCookie keeps the browser's cookie deadline aligned when the
+// administrator changes the policy for sessions that already exist.
+func (s *Server) refreshSessionCookie(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return
+	}
+	_, expiresAt, valid, validateErr := s.store.ValidateSessionExpiry(r.Context(), hashToken(cookie.Value), time.Now())
+	if validateErr != nil || !valid {
+		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+		return
+	}
+	remaining := time.Until(expiresAt)
+	maxAge := int(remaining.Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: cookie.Value, Path: "/", Expires: expiresAt, MaxAge: maxAge, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -179,12 +205,17 @@ func currentSessionHash(r *http.Request) string {
 }
 
 func (s *Server) sessionUser(r *http.Request) (string, bool) {
+	username, _, valid := s.session(r)
+	return username, valid
+}
+
+func (s *Server) session(r *http.Request) (string, time.Time, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || len(cookie.Value) < 32 {
-		return "", false
+		return "", time.Time{}, false
 	}
-	username, ok, err := s.store.ValidateSession(r.Context(), hashToken(cookie.Value), time.Now())
-	return username, ok && err == nil
+	username, expiresAt, ok, err := s.store.ValidateSessionExpiry(r.Context(), hashToken(cookie.Value), time.Now())
+	return username, expiresAt, ok && err == nil
 }
 
 func decodeAuthRequest(w http.ResponseWriter, r *http.Request) (authRequest, bool) {

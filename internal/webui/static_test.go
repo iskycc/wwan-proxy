@@ -176,3 +176,34 @@ func TestFrontendUsesCustomSelectsAndReliableAuthVisibility(t *testing.T) {
 		t.Fatal("native browser confirmation must be replaced by the styled dialog")
 	}
 }
+
+func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssContent, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, css, html := string(jsContent), string(cssContent), string(htmlContent)
+	for _, check := range []string{"setSessionExpiry(status.expires_at)", "sessionExpiryTimer=setTimeout", "syncSessionExpiry()", "drawTimeSeriesChart", "niceChartMax", "step=range==='7d'?'hour':'minute'", "udpErrors", "UDP 丢弃 / 错误"} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("session/chart behavior %q is missing", check)
+		}
+	}
+	for _, check := range []string{".chart-canvas-wrap", "max-width:100%", "overflow:hidden", ".settings-layout{align-items:start}"} {
+		if !strings.Contains(css, check) {
+			t.Fatalf("bounded chart/security layout %q is missing", check)
+		}
+	}
+	for _, check := range []string{"class=\"chart-canvas-wrap", "stats-traffic-caption", "已过期设备会立即退出"} {
+		if !strings.Contains(html, check) {
+			t.Fatalf("chart/session UI %q is missing", check)
+		}
+	}
+}

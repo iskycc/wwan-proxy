@@ -64,6 +64,11 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if err := s.store.ApplySessionLifetime(r.Context(), time.Now(), time.Duration(settings.SessionLifetime)); err != nil {
+		s.internalError(w, r, "apply login session lifetime", err)
+		return
+	}
+	s.refreshSessionCookie(w, r)
 	if s.logLevelSetter != nil {
 		// Validation above guarantees this update cannot fail for the built-in
 		// persistent handler. Apply it only after SQLite accepts the setting so a
@@ -74,7 +79,6 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = s.store.PruneLogs(r.Context(), time.Now().AddDate(0, 0, -settings.LogRetentionDays))
-	_ = s.store.PruneSessions(r.Context(), time.Now())
 	s.log.Info("system settings saved", "remote", clientIP(r), "restart_required", s.settingsResponse(settings).RestartRequired)
 	writeJSON(w, http.StatusOK, s.settingsResponse(settings))
 }

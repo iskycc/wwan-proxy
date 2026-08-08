@@ -59,7 +59,9 @@ func main() {
 	}
 	logger := slog.New(handler)
 	_ = st.PruneLogs(context.Background(), time.Now().AddDate(0, 0, -settings.LogRetentionDays))
-	_ = st.PruneSessions(context.Background(), time.Now())
+	if err := st.ApplySessionLifetime(context.Background(), time.Now(), time.Duration(settings.SessionLifetime)); err != nil {
+		logger.Error("apply login session lifetime failed", "component", "startup", "error", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -111,8 +113,8 @@ func maintenanceLoop(ctx context.Context, st *store.Store, logger *slog.Logger) 
 			if err := st.PruneLogs(ctx, time.Now().AddDate(0, 0, -settings.LogRetentionDays)); err != nil {
 				logger.Error("prune expired logs failed", "component", "maintenance", "error", err)
 			}
-			if err := st.PruneSessions(ctx, time.Now()); err != nil {
-				logger.Error("prune expired sessions failed", "component", "maintenance", "error", err)
+			if err := st.ApplySessionLifetime(ctx, time.Now(), time.Duration(settings.SessionLifetime)); err != nil {
+				logger.Error("apply login session lifetime failed", "component", "maintenance", "error", err)
 			}
 		}
 	}

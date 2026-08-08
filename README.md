@@ -5,6 +5,7 @@ Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理�
 ## 功能
 
 - 标准 SOCKS5 `CONNECT`、`BIND` 和 `UDP ASSOCIATE`；`BIND` 默认关闭
+- SOCKS5 链式上游支持高吞吐 TCP 隧道与原生 UDP relay；链式 UDP 不封装进 TCP
 - HTTP forward proxy 与 HTTPS `CONNECT` 隧道（不解密、不替换目标证书）
 - IPv4、IPv6 和域名目标
 - 无认证或 RFC 1929 用户名密码认证
@@ -268,7 +269,7 @@ http://127.0.0.1:9090
 
 SOCKS5/HTTP Proxy 用户密码写入 SQLite 前会先计算 SHA-256，再使用 bcrypt 哈希；配置 API 不返回哈希，已有明文旧记录在数据库打开时自动迁移并清理旧页与 WAL 中的明文痕迹。这个静态保护不改变代理协议本身：RFC 1929 用户名密码认证和 HTTP Proxy Basic 认证在客户端到代理的链路上都不提供加密。不要把认证监听器直接暴露到不可信网络；应使用可信局域网、VPN、SSH 隧道或其他加密接入，并结合来源 CIDR 和防火墙限制访问。
 
-直接运行二进制、systemd 和 OpenWrt 部署的默认 WebUI 仅监听本机；Alpine OpenRC 在 SQLite 没有保存值时使用 `0.0.0.0:9090`。远程访问仍建议通过可信管理网络、SSH 端口转发或 HTTPS 反向代理，避免凭据和 Cookie 经明文 HTTP 传输。
+直接运行二进制和 OpenWrt 部署的默认 WebUI 仅监听本机；Ubuntu systemd 与 Alpine OpenRC 在 SQLite 没有保存值时使用 `0.0.0.0:9090`。远程访问应限制在可信管理网络，并优先通过 VPN、SSH 端口转发或 HTTPS 反向代理，避免凭据和 Cookie 经明文 HTTP 传输。
 
 绑定出口网口需要 root 或 `CAP_NET_RAW`。`interface` 配置填写 Linux 网口名即可，不区分物理网口和虚拟网口；WebUI 会通过 `/api/interfaces` 列出本机候选网口，但也允许直接手工填写：
 
@@ -386,11 +387,13 @@ UDP 10000:65535
 
 固定池模式只需逐一放行 `udp.relay_ports` 中配置的 UDP 端口，不要求端口连续。端口池的实际并发容量等于可成功绑定的端口数，通常按期望并发量及可能被其他进程占用的少量余量配置，并让 `udp.max_associations` 不小于期望并发数；没有必要为了并发上限之外的会话配置大量闲置端口。`udp.bind_ip`、`udp.advertise` 和 `udp.advertise_map` 必须保持相同地址族；TCP 控制连接的 peer 地址族也必须与 relay 一致。
 
-`udp.advertise=auto` 在 `bind_ip` 为具体地址时直接广播该地址；只有绑定 `0.0.0.0` 或 `::` 时才使用 SOCKS5 TCP 控制连接的本地地址。NAT 场景可以通过 `advertise` 或 `advertise_map` 明确映射。
+`udp.advertise=auto` 在 `bind_ip` 为具体地址时直接广播该地址；只有绑定 `0.0.0.0` 或 `::` 时才使用 SOCKS5 TCP 控制连接的本地地址。NAT 场景可以通过 `advertise`、按控制连接本地地址匹配的 `advertise_map`，或按客户端来源 IP/CIDR 匹配的 `advertise_source_map` 明确映射。云平台做 1:1 NAT、但公网 IP 没有配置在本机网口时，应显式填写映射，否则服务端无法从私网 socket 自动推导公网 Relay 地址。
 
-客户端侧和外网侧使用不同 socket；外网侧 socket 绑定对应出口网口。客户端源 IP 必须与 TCP 控制连接源 IP 一致，源端口在首包时锁定。默认回包策略锁定客户端联系过且仍在有效期内的目标 IP，同时允许 TFTP 等标准协议从协商后的新端口回复；启用 `udp.strict_endpoint` 后则要求回包 IP 和端口都与客户端发送目标完全一致。当前不重组 SOCKS5 UDP 分片，收到 `FRAG != 0` 的数据报会按 RFC 1928 对不支持分片实现的要求直接丢弃。
+客户端侧和外网侧使用不同 socket；外网侧 socket 绑定对应出口网口。为兼容 iPhone Wi‑Fi Calling、iCloud Private Relay 和 CGNAT 中控制连接地址与 `UDP ASSOCIATE` 声明地址不一致的情况，Relay 会在首个实际 UDP 数据报到达时锁定完整客户端 IP:port，之后拒绝其他来源。默认回包策略锁定客户端联系过且仍在有效期内的目标 IP，同时允许 TFTP、IKE 等协议从协商后的新端口回复；启用 `udp.strict_endpoint` 后则要求回包 IP 和端口都与客户端发送目标完全一致。当前不重组 SOCKS5 UDP 分片，收到 `FRAG != 0` 的数据报会按 RFC 1928 对不支持分片实现的要求直接丢弃。
 
-固定 relay 端口池没有额外 association token。客户端在 `UDP ASSOCIATE` 中将端口写为 `0` 时，首个匹配 TCP 来源 IP 的 UDP 包会锁定实际客户端端口；因此固定池模式不适合让同一 NAT 来源后的不可信客户端争抢使用。可控客户端应在请求中携带非零 UDP 源端口，并配合来源 CIDR、认证和防火墙。
+固定 relay 端口池没有额外 association token。客户端在 `UDP ASSOCIATE` 中将端口写为 `0` 时，首个到达该 Relay 端口的 UDP 包会锁定实际客户端端点；因此固定池模式不适合让不可信客户端争抢使用。应配合来源 CIDR、认证和防火墙保护 TCP 控制端口与 UDP Relay 端口。当公网客户端收到的自动 Relay 地址仍是私网/回环地址时，服务会立即写入带配置提示的警告；association 结束时还会把无数据、非法包、来源不匹配、DNS/ACL 丢弃、队列溢出和发送失败等诊断汇总写入持久日志，默认 `WARN` 级别即可看到异常会话。
+
+启用链式 SOCKS5 上游后，TCP `CONNECT` 和 UDP `ASSOCIATE` 都会经配置的出口网口连接上游。每个下游 UDP association 都维护独立的上游 TCP 控制连接和 UDP socket，控制连接关闭会同步释放两端 Relay；UDP 不会退化成 UDP-over-TCP。链式 `BIND` 仍不支持。
 
 ## Web API
 
@@ -440,7 +443,13 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
 
 安装器使用经过 `SHA256SUMS` 校验的静态 musl Release，不依赖宿主机 glibc 版本；它会创建 `wwan-proxy` 系统用户、保留并备份 SQLite 数据库、安装 systemd unit、启用服务并检查 `http://127.0.0.1:9090/api/health`。服务使用 `LimitNOFILE=65536`、`LimitNPROC=infinity` 和 `TasksMax=infinity`，同时只授予绑定出口网卡所需的 `CAP_NET_RAW`。
 
-WebUI 首次默认监听 `127.0.0.1:9090`，不会自动开放 UFW、nftables、云安全组或公网管理端口。建议通过 SSH 转发访问：
+全新安装且 SQLite 尚未保存监听地址时，WebUI 默认监听 `0.0.0.0:9090`，安装后的本机健康检查仍使用 `127.0.0.1`。已有数据库中保存的回环、自定义 IP 或自定义端口不会被安装器覆盖。安装器不会自动开放 UFW、nftables 或云安全组；请仅在可信管理网络放行 TCP/9090，并尽快初始化管理员。安装后可直接访问：
+
+```text
+http://<Ubuntu 主机 IP>:9090
+```
+
+不希望暴露管理端口时，可在 WebUI 中改回 `127.0.0.1:9090` 并重启，然后通过 SSH 转发访问：
 
 ```bash
 ssh -L 9090:127.0.0.1:9090 user@server
