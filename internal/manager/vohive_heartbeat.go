@@ -3,6 +3,8 @@ package manager
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,8 +75,8 @@ func (m *Manager) runOneVohiveHeartbeatTick(ctx context.Context) {
 		m.vohiveHealth.mu.Unlock()
 		m.log.Error("vohive health check failed", "error", err)
 		m.recordVohiveEvent(ctx, store.VohiveEventDegraded, "system", nil,
-			fmt.Sprintf("vohive health check failed: %v", err),
-			map[string]any{"error": err.Error()})
+			vohiveHealthFailureMessage(health, err),
+			vohiveHealthFailureDetails(health, err))
 		return
 	}
 	m.vohiveHealth.mu.Lock()
@@ -192,4 +194,41 @@ func deviceHealthDetails(d vohive.DeviceHealth) map[string]any {
 		"network_connected": d.NetworkConnected,
 		"signal":            d.Signal,
 	}
+}
+
+func vohiveHealthFailureMessage(health *vohive.HealthResponse, err error) string {
+	if health == nil || len(health.Devices) == 0 {
+		return fmt.Sprintf("vohive health check failed: %v", err)
+	}
+	healthy, unhealthy := make([]string, 0, len(health.Devices)), make([]string, 0, len(health.Devices))
+	for id, device := range health.Devices {
+		if device.Healthy {
+			healthy = append(healthy, id)
+		} else {
+			unhealthy = append(unhealthy, id)
+		}
+	}
+	sort.Strings(healthy)
+	sort.Strings(unhealthy)
+	parts := make([]string, 0, 2)
+	if len(healthy) > 0 {
+		parts = append(parts, "healthy "+strings.Join(healthy, ", "))
+	}
+	if len(unhealthy) > 0 {
+		parts = append(parts, "unhealthy "+strings.Join(unhealthy, ", "))
+	}
+	status := health.Status
+	if status == "" {
+		status = "unhealthy"
+	}
+	return fmt.Sprintf("vohive health %s: %s", status, strings.Join(parts, "; "))
+}
+
+func vohiveHealthFailureDetails(health *vohive.HealthResponse, err error) map[string]any {
+	details := map[string]any{"error": err.Error()}
+	if health != nil {
+		details["status"] = health.Status
+		details["devices"] = health.Devices
+	}
+	return details
 }

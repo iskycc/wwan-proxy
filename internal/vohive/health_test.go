@@ -161,6 +161,42 @@ func TestGetHealthNon2XXReturnsError(t *testing.T) {
 	}
 }
 
+func TestGetHealthNon2XXReturnsParsedHealthPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
+			_ = json.NewEncoder(w).Encode(LoginResponse{
+				ExpiresAt: time.Now().Add(time.Hour), Status: "ok", Token: "token123",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/health":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(HealthResponse{
+				Status: "unhealthy",
+				Devices: map[string]DeviceHealth{
+					"Y1": {Healthy: true, ModemOK: true, IfaceUp: true, NetworkConnected: true, Signal: -53},
+					"Y4": {Healthy: false, ModemOK: false},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "user", "pass", 0)
+	health, err := client.GetHealth(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 503 response")
+	}
+	if health == nil || health.Status != "unhealthy" || len(health.Devices) != 2 {
+		t.Fatalf("health = %+v, want parsed unhealthy response", health)
+	}
+	if health.Devices["Y4"].Healthy {
+		t.Fatal("Y4 should be unhealthy")
+	}
+}
+
 func TestDeviceNetworkPathEscapes(t *testing.T) {
 	id := "device/with space"
 	got := deviceNetworkPath(id)

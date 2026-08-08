@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -293,6 +294,55 @@ func TestVohiveHealthFailureRecordsEvent(t *testing.T) {
 	}
 	if degradedCount != 1 {
 		t.Fatalf("expected 1 degraded event for system, got %d", degradedCount)
+	}
+}
+
+func TestVohiveHealthFailureRecordsDeviceSummaryAndRawError(t *testing.T) {
+	vohiveServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/auth/login" {
+			_ = json.NewEncoder(w).Encode(vohive.LoginResponse{
+				ExpiresAt: time.Now().Add(time.Hour), Status: "ok", Token: "test-token",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(vohive.HealthResponse{
+			Status: "unhealthy",
+			Devices: map[string]vohive.DeviceHealth{
+				"Y1": {Healthy: true, ModemOK: true, IfaceUp: true, NetworkConnected: true, Signal: -53},
+				"Y2": {Healthy: true, ModemOK: true, Signal: -54},
+				"Y3": {Healthy: true, ModemOK: true, Signal: -56},
+				"Y4": {Healthy: false, ModemOK: false},
+			},
+		})
+	}))
+	defer vohiveServer.Close()
+
+	m, st, _, cleanup := newVohiveTestManagerWithURL(t, vohiveServer.URL)
+	defer cleanup()
+
+	m.runOneVohiveHeartbeatTick(context.Background())
+	events, err := st.ListVohiveEvents(context.Background(), store.ListVohiveEventsOptions{DeviceID: "system"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Message != "vohive health unhealthy: healthy Y1, Y2, Y3; unhealthy Y4" {
+		t.Fatalf("message = %q", event.Message)
+	}
+	if strings.Contains(event.Message, `"devices"`) {
+		t.Fatal("summary must not contain the raw health response")
+	}
+	rawError, _ := event.Details["error"].(string)
+	if !strings.Contains(rawError, "returned 503") || !strings.Contains(rawError, `"Y4"`) {
+		t.Fatalf("raw error details = %q", rawError)
+	}
+	if _, ok := event.Details["devices"].(map[string]any); !ok {
+		t.Fatalf("structured devices missing from details: %+v", event.Details)
 	}
 }
 

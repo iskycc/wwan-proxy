@@ -199,7 +199,7 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 			t.Fatalf("session/chart behavior %q is missing", check)
 		}
 	}
-	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "rebuildCustomSelect(select)", "setCustomSelectDisabled($('#update-interface'),running)", "waitForUpdate()", "renderUpdate(update)"} {
+	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "rebuildCustomSelect(select)", "setCustomSelectDisabled($('#update-interface'),running)", "waitForUpdate()", "renderUpdate(update)", "parseVohiveHealthPayload", "设备健康检查异常", "错误详情"} {
 		if !strings.Contains(js, check) {
 			t.Fatalf("automatic update behavior %q is missing", check)
 		}
@@ -221,5 +221,12 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 	}
 	if !strings.Contains(css, ".update-version-grid") || !strings.Contains(css, ".update-progress") {
 		t.Fatal("automatic update responsive styles are missing")
+	}
+	if !strings.Contains(css, ".event-health-device.healthy") || !strings.Contains(css, ".event-health-device.unhealthy") {
+		t.Fatal("vohive health summary styles are missing")
+	}
+	sideColumn, adminPanel, updatePanel := strings.Index(html, "class=\"settings-side-column\""), strings.Index(html, "id=\"admin-settings-form\""), strings.Index(html, "class=\"panel glass-card update-panel\"")
+	if sideColumn < 0 || adminPanel < sideColumn || updatePanel < adminPanel {
+		t.Fatal("software update panel must be below administrator security in the settings side column")
 	}
 }

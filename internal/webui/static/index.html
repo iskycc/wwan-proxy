@@ -184,39 +184,42 @@
             <div class="panel-actions"><span></span><button class="primary-button" type="submit">保存系统设置</button></div>
           </form>
 
-          <form class="panel glass-card settings-panel admin-settings-panel" id="admin-settings-form">
-            <div class="panel-head"><div><p class="eyebrow">ADMINISTRATOR</p><h3>管理员安全</h3></div><span class="security-mark">安全</span></div>
-            <p class="settings-copy">修改凭据后会保留当前浏览器，并立即撤销其他所有登录会话。</p>
-            <div class="settings-fields one-column">
-              <label>管理员用户名<input required name="username" autocomplete="username"></label>
-              <label>当前密码<input required type="password" name="current_password" autocomplete="current-password"></label>
-              <label>新密码<input type="password" name="new_password" autocomplete="new-password" placeholder="留空表示不修改密码"><small>修改时至少 12 个字符，最多 72 字节</small></label>
-              <label>确认新密码<input type="password" name="confirm_password" autocomplete="new-password"></label>
+          <div class="settings-side-column">
+            <form class="panel glass-card settings-panel admin-settings-panel" id="admin-settings-form">
+              <div class="panel-head"><div><p class="eyebrow">ADMINISTRATOR</p><h3>管理员安全</h3></div><span class="security-mark">安全</span></div>
+              <p class="settings-copy">修改凭据后会保留当前浏览器，并立即撤销其他所有登录会话。</p>
+              <div class="settings-fields one-column">
+                <label>管理员用户名<input required name="username" autocomplete="username"></label>
+                <label>当前密码<input required type="password" name="current_password" autocomplete="current-password"></label>
+                <label>新密码<input type="password" name="new_password" autocomplete="new-password" placeholder="留空表示不修改密码"><small>修改时至少 12 个字符，最多 72 字节</small></label>
+                <label>确认新密码<input type="password" name="confirm_password" autocomplete="new-password"></label>
+              </div>
+              <div class="form-error" id="admin-settings-error"></div>
+              <div class="panel-actions"><span></span><button class="primary-button" type="submit">更新管理员</button></div>
+            </form>
+
+            <div class="panel glass-card update-panel">
+              <div class="panel-head update-panel-head">
+                <div><p class="eyebrow">SOFTWARE UPDATE</p><h3>程序更新</h3></div>
+                <span class="settings-badge" id="update-badge">尚未检查</span>
+              </div>
+              <p class="settings-copy">从项目 GitHub Release 检查新版本。更新包会匹配当前架构、验证 SHA-256，并由本机特权更新代理完成原子替换和服务重启。</p>
+              <div class="update-version-grid">
+                <div class="update-version-item"><span>当前版本</span><strong id="update-current-version">—</strong><small id="update-platform">正在识别运行环境…</small></div>
+                <div class="update-arrow" aria-hidden="true">→</div>
+                <div class="update-version-item"><span>最新版本</span><strong id="update-latest-version">尚未检查</strong><small id="update-release-time">点击下方按钮连接 GitHub</small></div>
+              </div>
+              <label class="update-interface-field">更新下载链路
+                <select class="native-select" id="update-interface" aria-label="更新下载链路">
+                  <option value="">系统默认路由</option>
+                </select>
+                <small>可选择已保存出口的网口；检查版本和下载更新包都会绑定该网口。</small>
+              </label>
+              <div class="update-progress hidden" id="update-progress"><i></i><div><strong id="update-progress-title">正在更新</strong><span id="update-progress-message">服务可能短暂断开，页面会自动重连。</span></div></div>
+              <div class="form-error" id="update-error"></div>
+              <div class="panel-actions update-actions"><span id="update-support-message">检查更新前不会自动访问外部网络</span><button class="secondary-button" id="check-update" type="button">检查更新</button><button class="primary-button" id="install-update" type="button" disabled>立即更新</button></div>
             </div>
-            <div class="form-error" id="admin-settings-error"></div>
-            <div class="panel-actions"><span></span><button class="primary-button" type="submit">更新管理员</button></div>
-          </form>
-        </div>
-        <div class="panel glass-card update-panel">
-          <div class="panel-head update-panel-head">
-            <div><p class="eyebrow">SOFTWARE UPDATE</p><h3>程序更新</h3></div>
-            <span class="settings-badge" id="update-badge">尚未检查</span>
           </div>
-          <p class="settings-copy">从项目 GitHub Release 检查新版本。更新包会匹配当前架构、验证 SHA-256，并由本机特权更新代理调用对应系统安装器完成原子替换和服务重启。</p>
-          <div class="update-version-grid">
-            <div class="update-version-item"><span>当前版本</span><strong id="update-current-version">—</strong><small id="update-platform">正在识别运行环境…</small></div>
-            <div class="update-arrow" aria-hidden="true">→</div>
-            <div class="update-version-item"><span>最新版本</span><strong id="update-latest-version">尚未检查</strong><small id="update-release-time">点击右侧按钮连接 GitHub</small></div>
-          </div>
-          <label class="update-interface-field">更新下载链路
-            <select class="native-select" id="update-interface" aria-label="更新下载链路">
-              <option value="">系统默认路由</option>
-            </select>
-            <small>可选择已保存出口的网口（例如 wwan0）；检查 Release 和下载安装包都会绑定该网口。留空则使用系统默认路由。</small>
-          </label>
-          <div class="update-progress hidden" id="update-progress"><i></i><div><strong id="update-progress-title">正在更新</strong><span id="update-progress-message">服务可能短暂断开，页面会自动重连。</span></div></div>
-          <div class="form-error" id="update-error"></div>
-          <div class="panel-actions update-actions"><span id="update-support-message">检查更新前不会自动访问外部网络</span><button class="secondary-button" id="check-update" type="button">检查更新</button><button class="primary-button" id="install-update" type="button" disabled>立即更新</button></div>
         </div>
         <div class="panel glass-card sessions-panel">
           <div class="panel-head"><div><p class="eyebrow">ACTIVE SESSIONS</p><h3>登录设备</h3></div><button class="secondary-button" id="revoke-others" type="button">撤销其他会话</button></div>

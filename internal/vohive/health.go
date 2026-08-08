@@ -60,13 +60,17 @@ func (c *Client) getHealth(ctx context.Context, allowRetry bool) (*HealthRespons
 	if err != nil {
 		return nil, err
 	}
+	var health HealthResponse
+	decodeErr := json.Unmarshal(body, &health)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if decodeErr == nil && (health.Status != "" || health.Devices != nil) {
+			return &health, fmt.Errorf("vohive GET /api/health returned %d: %s", resp.StatusCode, string(body))
+		}
 		return nil, fmt.Errorf("vohive GET /api/health returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	var health HealthResponse
-	if err := json.Unmarshal(body, &health); err != nil {
-		return nil, fmt.Errorf("decode vohive health response: %w", err)
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode vohive health response: %w", decodeErr)
 	}
 	return &health, nil
 }
