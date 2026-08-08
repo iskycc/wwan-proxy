@@ -209,8 +209,9 @@
             <div class="update-version-item"><span>最新版本</span><strong id="update-latest-version">尚未检查</strong><small id="update-release-time">点击右侧按钮连接 GitHub</small></div>
           </div>
           <label class="update-interface-field">更新下载链路
-            <input id="update-interface" list="update-interface-options" placeholder="系统默认路由（可选）" autocomplete="off">
-            <datalist id="update-interface-options"></datalist>
+            <select class="native-select" id="update-interface" aria-label="更新下载链路">
+              <option value="">系统默认路由</option>
+            </select>
             <small>可选择已保存出口的网口（例如 wwan0）；检查 Release 和下载安装包都会绑定该网口。留空则使用系统默认路由。</small>
           </label>
           <div class="update-progress hidden" id="update-progress"><i></i><div><strong id="update-progress-title">正在更新</strong><span id="update-progress-message">服务可能短暂断开，页面会自动重连。</span></div></div>

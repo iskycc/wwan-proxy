@@ -199,7 +199,7 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 			t.Fatalf("session/chart behavior %q is missing", check)
 		}
 	}
-	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "waitForUpdate()", "renderUpdate(update)"} {
+	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "rebuildCustomSelect(select)", "setCustomSelectDisabled($('#update-interface'),running)", "waitForUpdate()", "renderUpdate(update)"} {
 		if !strings.Contains(js, check) {
 			t.Fatalf("automatic update behavior %q is missing", check)
 		}
@@ -214,7 +214,7 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 			t.Fatalf("chart/session UI %q is missing", check)
 		}
 	}
-	for _, check := range []string{"id=\"check-update\"", "id=\"install-update\"", "id=\"update-current-version\"", "id=\"update-interface\"", "id=\"update-interface-options\""} {
+	for _, check := range []string{"id=\"check-update\"", "id=\"install-update\"", "id=\"update-current-version\"", "class=\"native-select\" id=\"update-interface\"", "系统默认路由"} {
 		if !strings.Contains(html, check) {
 			t.Fatalf("automatic update UI %q is missing", check)
 		}
