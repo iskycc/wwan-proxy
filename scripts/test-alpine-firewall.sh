@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 ARCHIVE SHA256SUMS" >&2
@@ -35,6 +35,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'status=$?; echo "[firewall-test] failed at line ${LINENO}: ${BASH_COMMAND} (exit ${status})" >&2; exit "${status}"' ERR
 
 echo "[firewall-test] starting privileged Alpine 3.23/OpenRC container ${container_name}"
 docker run --detach --privileged \
@@ -102,8 +103,9 @@ docker exec "${container_name}" sh /workspace/scripts/install-alpine.sh \
   --archive "${archive_in_container}" \
   --checksum "${checksums_in_container}" \
   >/tmp/wwan-proxy-alpine-firewall-repeat.log
-test "$(docker exec "${container_name}" nft -a list chain inet filter input | grep -c 'accept wwan-proxy WebUI')" -eq 1
-docker exec "${container_name}" nft -a list chain inet filter input | grep -Fq 'wwan-proxy CI runtime-only'
+nft_input_rules=$(docker exec "${container_name}" nft -a list chain inet filter input)
+test "$(grep -c 'accept wwan-proxy WebUI' <<<"${nft_input_rules}")" -eq 1
+grep -F 'wwan-proxy CI runtime-only' <<<"${nft_input_rules}" >/dev/null
 
 echo "[firewall-test] an enabled but stopped nftables service must fail closed"
 docker exec "${container_name}" rc-service nftables stop >/dev/null
@@ -295,7 +297,7 @@ curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-time 3
   "http://${firewalld_container_ipv4}:9090/api/health" >/dev/null
 docker exec "${firewalld_container_name}" rc-service firewalld start >/dev/null
 for attempt in $(seq 1 30); do
-  if docker exec "${firewalld_container_name}" firewall-cmd --state 2>/dev/null | grep -Fqx running; then
+  if [[ $(docker exec "${firewalld_container_name}" firewall-cmd --state 2>/dev/null) == running ]]; then
     break
   fi
   if [[ ${attempt} -eq 30 ]]; then
@@ -319,7 +321,7 @@ docker exec "${firewalld_container_name}" sh -ec '
   rc-service firewalld start >/dev/null
 '
 for attempt in $(seq 1 30); do
-  if docker exec "${firewalld_container_name}" firewall-cmd --state 2>/dev/null | grep -Fqx running; then
+  if [[ $(docker exec "${firewalld_container_name}" firewall-cmd --state 2>/dev/null) == running ]]; then
     break
   fi
   if [[ ${attempt} -eq 30 ]]; then
@@ -359,7 +361,7 @@ docker exec "${firewalld_container_name}" sh -ec '
   rc-service firewalld start >/dev/null
 '
 for attempt in $(seq 1 30); do
-  if docker exec "${firewalld_container_name}" firewall-cmd --state 2>/dev/null | grep -Fqx running; then
+  if [[ $(docker exec "${firewalld_container_name}" firewall-cmd --state 2>/dev/null) == running ]]; then
     break
   fi
   if [[ ${attempt} -eq 30 ]]; then
@@ -463,7 +465,8 @@ docker exec "${ufw_container_name}" sh -ec '
   nft '\''add rule inet guard input ct state established,related accept'\''
   nft add rule inet guard input drop
 '
-docker exec "${ufw_container_name}" sh -ec '/usr/sbin/ufw status | grep -Eq "^Status:[[:space:]]+active$"'
+ufw_status=$(docker exec "${ufw_container_name}" /usr/sbin/ufw status)
+grep -Eq '^Status:[[:space:]]+active$' <<<"${ufw_status}"
 if docker exec "${ufw_container_name}" sh /workspace/scripts/install-alpine.sh \
   --archive "${archive_in_container}" \
   --checksum "${checksums_in_container}" \
@@ -473,7 +476,8 @@ if docker exec "${ufw_container_name}" sh /workspace/scripts/install-alpine.sh \
 fi
 grep -Fq 'multiple independent firewall owners are active' \
   /tmp/wwan-proxy-alpine-firewall-ufw-extra-hook.log
-if docker exec "${ufw_container_name}" /usr/sbin/ufw status | grep -Eq '(^|[[:space:]])9090(/tcp)?([[:space:]]|$)'; then
+ufw_status=$(docker exec "${ufw_container_name}" /usr/sbin/ufw status)
+if grep -Eq '(^|[[:space:]])9090(/tcp)?([[:space:]]|$)' <<<"${ufw_status}"; then
   echo "installer mutated UFW before rejecting the extra INPUT hook" >&2
   exit 1
 fi
