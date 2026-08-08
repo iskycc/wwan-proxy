@@ -199,7 +199,7 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 			t.Fatalf("session/chart behavior %q is missing", check)
 		}
 	}
-	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "rebuildCustomSelect(select)", "setCustomSelectDisabled($('#update-interface'),running)", "waitForUpdate()", "renderUpdate(update)", "parseVohiveHealthPayload", "设备健康检查异常", "错误详情"} {
+	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "rebuildCustomSelect(select)", "setCustomSelectDisabled($('#update-interface'),running)", "$('#update-panel').open=true", "waitForUpdate()", "renderUpdate(update)", "parseVohiveHealthPayload", "vohiveFailurePresentation", "Vohive 健康检查超时", "Vohive 登录受限", "设备健康检查异常", "错误详情"} {
 		if !strings.Contains(js, check) {
 			t.Fatalf("automatic update behavior %q is missing", check)
 		}
@@ -214,7 +214,7 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 			t.Fatalf("chart/session UI %q is missing", check)
 		}
 	}
-	for _, check := range []string{"id=\"check-update\"", "id=\"install-update\"", "id=\"update-current-version\"", "class=\"native-select\" id=\"update-interface\"", "系统默认路由"} {
+	for _, check := range []string{"id=\"check-update\"", "id=\"install-update\"", "id=\"update-current-version\"", "class=\"native-select\" id=\"update-interface\"", "class=\"panel glass-card update-panel\" id=\"update-panel\"", "系统默认路由"} {
 		if !strings.Contains(html, check) {
 			t.Fatalf("automatic update UI %q is missing", check)
 		}
@@ -224,6 +224,12 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 	}
 	if !strings.Contains(css, ".event-health-device.healthy") || !strings.Contains(css, ".event-health-device.unhealthy") {
 		t.Fatal("vohive health summary styles are missing")
+	}
+	if !strings.Contains(css, ".event-cause-chip.timeout") || !strings.Contains(css, ".event-cause-chip.limited") {
+		t.Fatal("vohive timeout or rate-limit summary styles are missing")
+	}
+	if !strings.Contains(css, ".settings-side-column>.panel{width:100%") || !strings.Contains(css, ".update-panel>summary") {
+		t.Fatal("settings side cards must have equal width and a compact update summary")
 	}
 	sideColumn, adminPanel, updatePanel := strings.Index(html, "class=\"settings-side-column\""), strings.Index(html, "id=\"admin-settings-form\""), strings.Index(html, "class=\"panel glass-card update-panel\"")
 	if sideColumn < 0 || adminPanel < sideColumn || updatePanel < adminPanel {

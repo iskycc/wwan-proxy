@@ -198,6 +198,13 @@ func deviceHealthDetails(d vohive.DeviceHealth) map[string]any {
 
 func vohiveHealthFailureMessage(health *vohive.HealthResponse, err error) string {
 	if health == nil || len(health.Devices) == 0 {
+		message := err.Error()
+		switch {
+		case strings.Contains(message, "context deadline exceeded"), strings.Contains(message, "Client.Timeout exceeded"):
+			return "vohive health check timed out"
+		case strings.Contains(message, "login returned 429"), strings.Contains(message, "rate_limited"):
+			return "vohive authentication rate limited"
+		}
 		return fmt.Sprintf("vohive health check failed: %v", err)
 	}
 	healthy, unhealthy := make([]string, 0, len(health.Devices)), make([]string, 0, len(health.Devices))

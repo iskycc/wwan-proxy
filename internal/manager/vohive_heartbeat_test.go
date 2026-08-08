@@ -346,6 +346,32 @@ func TestVohiveHealthFailureRecordsDeviceSummaryAndRawError(t *testing.T) {
 	}
 }
 
+func TestVohiveHealthFailureMessageClassifiesCommonErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  string
+		want string
+	}{
+		{
+			name: "timeout",
+			err:  `Get "http://192.168.8.88:7575/api/health": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+			want: "vohive health check timed out",
+		},
+		{
+			name: "rate limited",
+			err:  `vohive authenticate: vohive login returned 429: {"code":"rate_limited"}`,
+			want: "vohive authentication rate limited",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := vohiveHealthFailureMessage(nil, errors.New(test.err)); got != test.want {
+				t.Fatalf("message = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestManagerCloseWaitsForVohiveRecovery(t *testing.T) {
 	m, st, cfg, cleanup := newVohiveTestManager(t)
 	defer cleanup()
