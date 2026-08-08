@@ -33,7 +33,11 @@ jobs:
       - name: Validate OpenWrt init script
         run: |
           test -x openwrt/wwan-proxy.init
+          test -x openwrt/wwan-proxy-updater.init
+          test -x scripts/install-openwrt.sh
           sh -n openwrt/wwan-proxy.init
+          sh -n openwrt/wwan-proxy-updater.init
+          sh -n scripts/install-openwrt.sh
 
       - name: Validate installer and service files
         run: |
@@ -42,15 +46,19 @@ jobs:
           test -x scripts/install-ubuntu.sh
           test -x scripts/test-alpine-firewall.sh
           test -x alpine/wwan-proxy.openrc
+          test -x alpine/wwan-proxy-updater.openrc
           sh -n scripts/install-alpine.sh
           sh -n scripts/install-dante-alpine.sh
           bash -n scripts/install-ubuntu.sh
           bash -n scripts/test-alpine-firewall.sh
           sh -n alpine/wwan-proxy.openrc
+          sh -n alpine/wwan-proxy-updater.openrc
           test -s alpine/wwan-proxy.confd
           test -s alpine/wwan-proxy.logrotate
           grep --fixed-strings --line-regexp --quiet 'LimitNPROC=infinity' wwan-proxy.service
           grep --fixed-strings --line-regexp --quiet 'TasksMax=infinity' wwan-proxy.service
+          grep --fixed-strings --line-regexp --quiet 'User=root' wwan-proxy-updater.service
+          grep --fixed-strings --quiet -- '-update-agent -update-platform ubuntu' wwan-proxy-updater.service
 
       - name: Validate scripts with supported Alpine BusyBox ash
         run: |
@@ -62,6 +70,9 @@ jobs:
                 sh -n /src/scripts/install-alpine.sh
                 sh -n /src/scripts/install-dante-alpine.sh
                 sh -n /src/alpine/wwan-proxy.openrc
+                sh -n /src/alpine/wwan-proxy-updater.openrc
+                sh -n /src/openwrt/wwan-proxy-updater.init
+                sh -n /src/scripts/install-openwrt.sh
               '
           done
 
@@ -137,10 +148,10 @@ jobs:
             -ldflags "${build_ldflags}" \
             -o "${package_dir}/wwan-proxy" \
             ./cmd/wwan-proxy
-          cp README.md wwan-proxy.service "${package_dir}/"
-          cp openwrt/wwan-proxy.init "${package_dir}/"
-          cp scripts/install-alpine.sh scripts/install-dante-alpine.sh scripts/install-ubuntu.sh "${package_dir}/"
-          cp alpine/wwan-proxy.openrc alpine/wwan-proxy.confd alpine/wwan-proxy.logrotate "${package_dir}/"
+          cp README.md wwan-proxy.service wwan-proxy-updater.service "${package_dir}/"
+          cp openwrt/wwan-proxy.init openwrt/wwan-proxy-updater.init "${package_dir}/"
+          cp scripts/install-alpine.sh scripts/install-dante-alpine.sh scripts/install-openwrt.sh scripts/install-ubuntu.sh "${package_dir}/"
+          cp alpine/wwan-proxy.openrc alpine/wwan-proxy-updater.openrc alpine/wwan-proxy.confd alpine/wwan-proxy.logrotate "${package_dir}/"
           tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
 
       - name: Verify release package contents
@@ -152,9 +163,10 @@ jobs:
           contents="dist/${PACKAGE_NAME}.contents"
           tar -tzf "${archive}" > "${contents}"
           for expected in \
-            wwan-proxy README.md wwan-proxy.service wwan-proxy.init \
-            install-alpine.sh install-dante-alpine.sh install-ubuntu.sh \
-            wwan-proxy.openrc wwan-proxy.confd wwan-proxy.logrotate
+            wwan-proxy README.md wwan-proxy.service wwan-proxy-updater.service \
+            wwan-proxy.init wwan-proxy-updater.init \
+            install-alpine.sh install-dante-alpine.sh install-openwrt.sh install-ubuntu.sh \
+            wwan-proxy.openrc wwan-proxy-updater.openrc wwan-proxy.confd wwan-proxy.logrotate
           do
             grep --fixed-strings --line-regexp --quiet "${PACKAGE_NAME}/${expected}" "${contents}"
           done
@@ -185,8 +197,19 @@ jobs:
                   -print-web-listen)
                 test "${listener}" = 0.0.0.0:9090
                 grep -q -- "-web-default 0.0.0.0:9090" /etc/init.d/wwan-proxy
+                test -x /etc/init.d/wwan-proxy-updater
+                test -x /usr/local/libexec/wwan-proxy/install-alpine.sh
+                grep -q -- "-update-agent -update-platform alpine" /etc/init.d/wwan-proxy-updater
                 test ! -e /etc/nftables.d/50_wwan-proxy.nft
-                grep -Fq -- "--no-start selected; service was not enabled or started, and firewall inspection or changes were deferred" /var/log/wwan-proxy-install.log
+                grep -Fq -- "--no-start selected; services were not enabled or started, and firewall inspection or changes were deferred" /var/log/wwan-proxy-install.log
+
+                printf "%s\n" preserve-me >/var/lib/wwan-proxy/wwan-proxy.db
+                chown wwan-proxy:wwan-proxy /var/lib/wwan-proxy/wwan-proxy.db
+                /usr/local/libexec/wwan-proxy/install-alpine.sh \
+                  --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                  --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                  --no-start
+                test "$(cat /var/lib/wwan-proxy/wwan-proxy.db)" = preserve-me
 
                 /usr/local/bin/wwan-proxy \
                   -db /tmp/wwan-proxy-live-listener-test.db \
@@ -216,6 +239,35 @@ jobs:
                 trap - EXIT
               '
           done
+
+      - name: Smoke-test OpenWrt repeatable installer
+        if: matrix.libc == 'musl'
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${PWD}:/workspace:ro" \
+            alpine:3.23 \
+            sh -ec '
+              mkdir -p /etc/init.d
+              printf "%s\n" "exit 0" >/etc/rc.common
+              chmod 0755 /etc/rc.common
+              printf "%s\n" "test" >/etc/openwrt_version
+              sh /workspace/scripts/install-openwrt.sh \
+                --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                --no-start
+              test -x /opt/wwan-proxy/wwan-proxy
+              test -x /opt/wwan-proxy/install-openwrt.sh
+              test -x /etc/init.d/wwan-proxy-updater
+              printf "%s\n" "preserve-me" >/opt/wwan-proxy/wwan-proxy.db
+              /opt/wwan-proxy/install-openwrt.sh \
+                --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                --no-start
+              test "$(cat /opt/wwan-proxy/wwan-proxy.db)" = preserve-me
+            '
 
       - name: Verify static musl binary
         if: matrix.libc == 'musl'
@@ -249,10 +301,21 @@ jobs:
             docker run --rm \
               --volume "${PWD}:/workspace:ro" \
               "ubuntu:${ubuntu_version}" \
-              bash /workspace/scripts/install-ubuntu.sh \
-                --archive "/workspace/dist/${PACKAGE_NAME}.tar.gz" \
-                --checksum "/workspace/dist/${PACKAGE_NAME}.SHA256SUMS" \
-                --no-start
+              bash -ec '
+                bash /workspace/scripts/install-ubuntu.sh \
+                  --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                  --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                  --no-start
+                test -x /usr/local/libexec/wwan-proxy/install-ubuntu.sh
+                test -s /etc/systemd/system/wwan-proxy-updater.service
+                printf "%s\n" preserve-me >/var/lib/wwan-proxy/wwan-proxy.db
+                chown wwan-proxy:wwan-proxy /var/lib/wwan-proxy/wwan-proxy.db
+                /usr/local/libexec/wwan-proxy/install-ubuntu.sh \
+                  --archive "/workspace/dist/'"${PACKAGE_NAME}"'.tar.gz" \
+                  --checksum "/workspace/dist/'"${PACKAGE_NAME}"'.SHA256SUMS" \
+                  --no-start
+                test "$(cat /var/lib/wwan-proxy/wwan-proxy.db)" = preserve-me
+              '
           done
 
       - name: Test Alpine nftables detection and opening

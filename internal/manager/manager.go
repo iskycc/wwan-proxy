@@ -36,6 +36,8 @@ type Manager struct {
 	vohiveStatusRetryDelay func(context.Context) error
 
 	vohiveHealth          *vohiveHealthState
+	vohiveClient          *vohive.Client
+	vohiveClientSettings  config.VohiveSettings
 	systemVohiveSettings  config.VohiveSettings
 	vohiveHeartbeatCancel context.CancelFunc
 	vohiveHeartbeatWG     sync.WaitGroup
@@ -439,7 +441,7 @@ func (m *Manager) newInstance(cfg config.Server, limits *instanceLimits) *instan
 	}
 	if settings, err := m.store.SystemSettings(ctx); err == nil && settings.Vohive.Enabled && cfg.VohiveDeviceID != "" {
 		inst.vohiveSettings = settings.Vohive
-		inst.vohiveClient = vohive.NewClient(settings.Vohive.BaseURL, settings.Vohive.Username, settings.Vohive.Password, 30*time.Second)
+		inst.vohiveClient = m.sharedVohiveClient(settings.Vohive)
 	}
 	return inst
 }

@@ -46,6 +46,7 @@ type Server struct {
 	websocketClients    atomic.Int64
 	configurationMu     sync.Mutex
 	logLevelSetter      interface{ SetLevel(string) error }
+	updates             updateController
 	// initialLiveHeap keeps the dashboard stable until the runtime completes its first GC cycle.
 	initialLiveHeap atomic.Uint64
 }
@@ -71,6 +72,8 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 	mux.HandleFunc("POST /api/sessions/revoke-others", s.revokeOtherSessions)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.saveSettings)
+	mux.HandleFunc("GET /api/update", s.getUpdate)
+	mux.HandleFunc("POST /api/update", s.startUpdate)
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/ws", s.overviewWebSocket)
 	mux.HandleFunc("GET /api/servers", s.listServers)

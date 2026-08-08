@@ -11,6 +11,9 @@ SUPPORTED_UBUNTU_LTS="22.04 24.04 26.04"
 
 INSTALL_BINARY="/usr/local/bin/wwan-proxy"
 INSTALL_UNIT="/etc/systemd/system/wwan-proxy.service"
+INSTALL_UPDATER_UNIT="/etc/systemd/system/wwan-proxy-updater.service"
+INSTALLER_DIR="/usr/local/libexec/wwan-proxy"
+INSTALL_INSTALLER="${INSTALLER_DIR}/install-ubuntu.sh"
 DATA_DIR="/var/lib/wwan-proxy"
 DATABASE_PATH="${DATA_DIR}/wwan-proxy.db"
 INSTALL_LOG="/var/log/wwan-proxy-install.log"
@@ -21,11 +24,13 @@ REPOSITORY="${WWAN_PROXY_REPOSITORY:-${DEFAULT_REPOSITORY}}"
 RELEASE_VERSION="${WWAN_PROXY_VERSION:-latest}"
 LOCAL_ARCHIVE="${WWAN_PROXY_ARCHIVE:-}"
 LOCAL_CHECKSUMS="${WWAN_PROXY_CHECKSUMS:-}"
+DOWNLOAD_INTERFACE="${WWAN_PROXY_DOWNLOAD_INTERFACE:-}"
 HEALTH_URL="${WWAN_PROXY_HEALTH_URL:-http://127.0.0.1:9090/api/health}"
 START_TIMEOUT="${WWAN_PROXY_START_TIMEOUT:-30}"
 NO_START="${WWAN_PROXY_NO_START:-0}"
 SKIP_HEALTH="${WWAN_PROXY_SKIP_HEALTH:-0}"
 FORCE_OS="${WWAN_PROXY_FORCE_OS:-0}"
+UPDATE_AGENT_RUN="${WWAN_PROXY_UPDATE_AGENT:-0}"
 
 WORK_DIR=""
 BACKUP_DIR=""
@@ -34,13 +39,19 @@ MUTATION_STARTED=0
 SUCCESS=0
 PREVIOUS_ACTIVE=0
 PREVIOUS_ENABLED=0
+PREVIOUS_UPDATER_ACTIVE=0
+PREVIOUS_UPDATER_ENABLED=0
 HAD_BINARY=0
 HAD_UNIT=0
+HAD_UPDATER_UNIT=0
+HAD_INSTALLER=0
 HAD_DATABASE=0
 SYSTEMD_FUNCTIONAL=0
 SERVICE_STOPPED_FOR_INSTALL=0
 BINARY_PUBLISH_STAGE=""
 UNIT_PUBLISH_STAGE=""
+UPDATER_UNIT_PUBLISH_STAGE=""
+INSTALLER_PUBLISH_STAGE=""
 
 usage() {
 	cat <<'EOF'
@@ -56,6 +67,8 @@ Options:
   --repo OWNER/REPO      GitHub repository (default: iskycc/wwan-proxy)
   --archive FILE         Install a local release archive
   --checksum FILE        SHA256SUMS for --archive (required with --archive)
+  --download-interface IFACE
+                         Bind GitHub metadata and package downloads to IFACE
   --health-url URL       Health endpoint after startup
   --start-timeout SEC    Startup timeout, 5-300 seconds (default: 30)
   --skip-health-check    Start the service without probing an HTTP endpoint
@@ -65,12 +78,14 @@ Options:
 
 Environment equivalents:
   WWAN_PROXY_VERSION, WWAN_PROXY_REPOSITORY, WWAN_PROXY_ARCHIVE,
-  WWAN_PROXY_CHECKSUMS, WWAN_PROXY_HEALTH_URL, WWAN_PROXY_START_TIMEOUT,
+  WWAN_PROXY_CHECKSUMS, WWAN_PROXY_DOWNLOAD_INTERFACE,
+  WWAN_PROXY_HEALTH_URL, WWAN_PROXY_START_TIMEOUT,
   WWAN_PROXY_SKIP_HEALTH, WWAN_PROXY_NO_START, WWAN_PROXY_FORCE_OS
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-ubuntu.sh | sudo bash
   sudo bash install-ubuntu.sh --version build-0123456789ab
+  sudo bash install-ubuntu.sh --download-interface wwan0
   sudo bash install-ubuntu.sh --health-url http://127.0.0.1:9191/api/health
   sudo bash install-ubuntu.sh --archive ./wwan-proxy-linux-amd64-musl.tar.gz --checksum ./SHA256SUMS
 
@@ -120,10 +135,15 @@ rollback() {
 	log WARN "installation failed after modifying service files; restoring the previous installation"
 	set +e
 	if [[ "${SYSTEMD_FUNCTIONAL}" -eq 1 ]]; then
+		if ! is_true "${UPDATE_AGENT_RUN}"; then
+			systemctl stop "${SERVICE_NAME}-updater.service" >/dev/null 2>&1
+		fi
 		systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1
 	fi
 	restore_path "${HAD_BINARY}" "${BACKUP_DIR}/wwan-proxy" "${INSTALL_BINARY}"
 	restore_path "${HAD_UNIT}" "${BACKUP_DIR}/wwan-proxy.service" "${INSTALL_UNIT}"
+	restore_path "${HAD_UPDATER_UNIT}" "${BACKUP_DIR}/wwan-proxy-updater.service" "${INSTALL_UPDATER_UNIT}"
+	restore_path "${HAD_INSTALLER}" "${BACKUP_DIR}/install-ubuntu.sh" "${INSTALL_INSTALLER}"
 	restore_path "${HAD_DATABASE}" "${BACKUP_DIR}/wwan-proxy.db" "${DATABASE_PATH}"
 	rm -f -- "${DATABASE_PATH}-wal" "${DATABASE_PATH}-shm"
 	if [[ "${SYSTEMD_FUNCTIONAL}" -eq 1 ]]; then
@@ -133,8 +153,16 @@ rollback() {
 		else
 			systemctl disable "${SERVICE_NAME}.service" >/dev/null 2>&1
 		fi
+		if [[ "${PREVIOUS_UPDATER_ENABLED}" -eq 1 ]]; then
+			systemctl enable "${SERVICE_NAME}-updater.service" >/dev/null 2>&1
+		else
+			systemctl disable "${SERVICE_NAME}-updater.service" >/dev/null 2>&1
+		fi
 		if [[ "${PREVIOUS_ACTIVE}" -eq 1 && "${HAD_BINARY}" -eq 1 && "${HAD_UNIT}" -eq 1 ]]; then
 			systemctl start "${SERVICE_NAME}.service" >/dev/null 2>&1
+		fi
+		if ! is_true "${UPDATE_AGENT_RUN}" && [[ "${PREVIOUS_UPDATER_ACTIVE}" -eq 1 && "${HAD_BINARY}" -eq 1 && "${HAD_UPDATER_UNIT}" -eq 1 && "${HAD_INSTALLER}" -eq 1 ]]; then
+			systemctl start "${SERVICE_NAME}-updater.service" >/dev/null 2>&1
 		fi
 	fi
 	set -e
@@ -151,6 +179,8 @@ cleanup() {
 	fi
 	[[ -n "${BINARY_PUBLISH_STAGE}" ]] && rm -f -- "${BINARY_PUBLISH_STAGE}"
 	[[ -n "${UNIT_PUBLISH_STAGE}" ]] && rm -f -- "${UNIT_PUBLISH_STAGE}"
+	[[ -n "${UPDATER_UNIT_PUBLISH_STAGE}" ]] && rm -f -- "${UPDATER_UNIT_PUBLISH_STAGE}"
+	[[ -n "${INSTALLER_PUBLISH_STAGE}" ]] && rm -f -- "${INSTALLER_PUBLISH_STAGE}"
 	if [[ "${status}" -ne 0 && "${MUTATION_STARTED}" -ne 1 && "${SERVICE_STOPPED_FOR_INSTALL}" -eq 1 && "${PREVIOUS_ACTIVE}" -eq 1 ]]; then
 		systemctl start "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
 	fi
@@ -181,6 +211,11 @@ while [[ "$#" -gt 0 ]]; do
 		--checksum|--checksums)
 			[[ "$#" -ge 2 ]] || { echo "${PROGRAM_NAME}: --checksum requires a value" >&2; exit 2; }
 			LOCAL_CHECKSUMS=$2
+			shift 2
+			;;
+		--download-interface)
+			[[ "$#" -ge 2 ]] || { echo "${PROGRAM_NAME}: --download-interface requires a value" >&2; exit 2; }
+			DOWNLOAD_INTERFACE=$2
 			shift 2
 			;;
 		--health-url)
@@ -265,6 +300,10 @@ esac
 case "${HEALTH_URL}" in
 	*://*@*|*\?*|*\#*) fatal "health URL must not contain credentials, query parameters, or fragments" ;;
 esac
+if [[ -n "${DOWNLOAD_INTERFACE}" ]]; then
+	[[ "${#DOWNLOAD_INTERFACE}" -le 15 && "${DOWNLOAD_INTERFACE}" =~ ^[A-Za-z0-9_.:-]+$ ]] || fatal "invalid download interface: ${DOWNLOAD_INTERFACE}"
+	[[ -d "/sys/class/net/${DOWNLOAD_INTERFACE}" ]] || fatal "download interface does not exist: ${DOWNLOAD_INTERFACE}"
+fi
 
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
 	lock_pid=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
@@ -343,10 +382,16 @@ download_file() {
 	local description=$1
 	local url=$2
 	local target=$3
+	local curl_args=(
+		--disable --fail-with-body --location --show-error --silent
+		--retry 3 --retry-all-errors --retry-delay 2
+		--connect-timeout 15 --max-time 300
+	)
+	if [[ -n "${DOWNLOAD_INTERFACE}" ]]; then
+		curl_args+=(--interface "${DOWNLOAD_INTERFACE}")
+	fi
 	log INFO "${description}"
-	curl --fail-with-body --location --show-error --silent \
-		--retry 3 --retry-all-errors --retry-delay 2 \
-		--connect-timeout 15 --max-time 300 \
+	curl "${curl_args[@]}" \
 		--output "${target}" "${url}"
 }
 
@@ -407,8 +452,12 @@ if find "${PACKAGE_ROOT}" -type l -print -quit | grep -q .; then
 fi
 SOURCE_BINARY="${PACKAGE_ROOT}/wwan-proxy"
 SOURCE_UNIT="${PACKAGE_ROOT}/wwan-proxy.service"
+SOURCE_UPDATER_UNIT="${PACKAGE_ROOT}/wwan-proxy-updater.service"
+SOURCE_INSTALLER="${PACKAGE_ROOT}/install-ubuntu.sh"
 [[ -f "${SOURCE_BINARY}" && -x "${SOURCE_BINARY}" ]] || fatal "release package has no executable wwan-proxy binary"
 [[ -f "${SOURCE_UNIT}" ]] || fatal "release package has no wwan-proxy.service"
+[[ -f "${SOURCE_UPDATER_UNIT}" ]] || fatal "release package has no wwan-proxy-updater.service"
+[[ -f "${SOURCE_INSTALLER}" ]] || fatal "release package has no install-ubuntu.sh"
 "${SOURCE_BINARY}" -version >/dev/null || fatal "release binary cannot run on Ubuntu ${OS_VERSION}/${dpkg_arch}"
 grep -Fqx 'User=wwan-proxy' "${SOURCE_UNIT}" || fatal "packaged unit has an unexpected service user"
 grep -Fqx 'Group=wwan-proxy' "${SOURCE_UNIT}" || fatal "packaged unit has an unexpected service group"
@@ -417,13 +466,21 @@ grep -Fqx 'AmbientCapabilities=CAP_NET_RAW' "${SOURCE_UNIT}" || fatal "packaged 
 grep -Fqx 'LimitNOFILE=65536' "${SOURCE_UNIT}" || fatal "packaged unit does not set LimitNOFILE=65536"
 grep -Fqx 'LimitNPROC=infinity' "${SOURCE_UNIT}" || fatal "packaged unit does not remove LimitNPROC"
 grep -Fqx 'TasksMax=infinity' "${SOURCE_UNIT}" || fatal "packaged unit does not remove TasksMax"
+grep -Fqx 'User=root' "${SOURCE_UPDATER_UNIT}" || fatal "packaged updater unit does not run as root"
+grep -Fqx 'NoNewPrivileges=true' "${SOURCE_UPDATER_UNIT}" || fatal "packaged updater unit does not restrict privilege escalation"
+grep -Fq -- '-update-agent -update-platform ubuntu -update-group wwan-proxy' "${SOURCE_UPDATER_UNIT}" || fatal "packaged updater unit has an unexpected command"
+bash -n "${SOURCE_INSTALLER}" || fatal "packaged Ubuntu installer has invalid shell syntax"
 
 if [[ "${SYSTEMD_FUNCTIONAL}" -eq 1 ]]; then
 	systemctl is-active --quiet "${SERVICE_NAME}.service" && PREVIOUS_ACTIVE=1 || true
 	systemctl is-enabled --quiet "${SERVICE_NAME}.service" && PREVIOUS_ENABLED=1 || true
+	systemctl is-active --quiet "${SERVICE_NAME}-updater.service" && PREVIOUS_UPDATER_ACTIVE=1 || true
+	systemctl is-enabled --quiet "${SERVICE_NAME}-updater.service" && PREVIOUS_UPDATER_ENABLED=1 || true
 fi
 [[ -e "${INSTALL_BINARY}" ]] && HAD_BINARY=1
 [[ -e "${INSTALL_UNIT}" ]] && HAD_UNIT=1
+[[ -e "${INSTALL_UPDATER_UNIT}" ]] && HAD_UPDATER_UNIT=1
+[[ -e "${INSTALL_INSTALLER}" ]] && HAD_INSTALLER=1
 [[ -e "${DATABASE_PATH}" ]] && HAD_DATABASE=1
 
 backup_stamp=$(date -u '+%Y%m%dT%H%M%SZ')
@@ -431,6 +488,8 @@ BACKUP_DIR="${BACKUP_ROOT}/${backup_stamp}-$$"
 mkdir -p "${BACKUP_DIR}"
 [[ "${HAD_BINARY}" -eq 1 ]] && cp -a -- "${INSTALL_BINARY}" "${BACKUP_DIR}/wwan-proxy"
 [[ "${HAD_UNIT}" -eq 1 ]] && cp -a -- "${INSTALL_UNIT}" "${BACKUP_DIR}/wwan-proxy.service"
+[[ "${HAD_UPDATER_UNIT}" -eq 1 ]] && cp -a -- "${INSTALL_UPDATER_UNIT}" "${BACKUP_DIR}/wwan-proxy-updater.service"
+[[ "${HAD_INSTALLER}" -eq 1 ]] && cp -a -- "${INSTALL_INSTALLER}" "${BACKUP_DIR}/install-ubuntu.sh"
 
 if ! getent group wwan-proxy >/dev/null; then
 	groupadd --system wwan-proxy
@@ -439,6 +498,7 @@ if ! getent passwd wwan-proxy >/dev/null; then
 	useradd --system --gid wwan-proxy --home-dir "${DATA_DIR}" --no-create-home --shell /usr/sbin/nologin wwan-proxy
 fi
 mkdir -p "${DATA_DIR}"
+mkdir -p "${INSTALLER_DIR}"
 chown wwan-proxy:wwan-proxy "${DATA_DIR}"
 chmod 0750 "${DATA_DIR}"
 
@@ -453,20 +513,33 @@ MUTATION_STARTED=1
 
 BINARY_PUBLISH_STAGE="/usr/local/bin/.wwan-proxy.install.$$"
 UNIT_PUBLISH_STAGE="/etc/systemd/system/.wwan-proxy.service.install.$$"
+UPDATER_UNIT_PUBLISH_STAGE="/etc/systemd/system/.wwan-proxy-updater.service.install.$$"
+INSTALLER_PUBLISH_STAGE="${INSTALLER_DIR}/.install-ubuntu.sh.install.$$"
 install -m 0755 "${SOURCE_BINARY}" "${BINARY_PUBLISH_STAGE}"
 install -m 0644 "${SOURCE_UNIT}" "${UNIT_PUBLISH_STAGE}"
+install -m 0644 "${SOURCE_UPDATER_UNIT}" "${UPDATER_UNIT_PUBLISH_STAGE}"
+install -m 0755 "${SOURCE_INSTALLER}" "${INSTALLER_PUBLISH_STAGE}"
 mv -f -- "${BINARY_PUBLISH_STAGE}" "${INSTALL_BINARY}"
 mv -f -- "${UNIT_PUBLISH_STAGE}" "${INSTALL_UNIT}"
+mv -f -- "${UPDATER_UNIT_PUBLISH_STAGE}" "${INSTALL_UPDATER_UNIT}"
+mv -f -- "${INSTALLER_PUBLISH_STAGE}" "${INSTALL_INSTALLER}"
 BINARY_PUBLISH_STAGE=""
 UNIT_PUBLISH_STAGE=""
-chown root:root "${INSTALL_BINARY}" "${INSTALL_UNIT}"
+UPDATER_UNIT_PUBLISH_STAGE=""
+INSTALLER_PUBLISH_STAGE=""
+chown root:root "${INSTALL_BINARY}" "${INSTALL_UNIT}" "${INSTALL_UPDATER_UNIT}" "${INSTALL_INSTALLER}"
 "${INSTALL_BINARY}" -version >/dev/null
 systemd-analyze verify "${INSTALL_UNIT}"
+systemd-analyze verify "${INSTALL_UPDATER_UNIT}"
 
 if is_true "${NO_START}"; then
 	if [[ "${SYSTEMD_FUNCTIONAL}" -eq 1 ]]; then
 		systemctl daemon-reload
+		if ! is_true "${UPDATE_AGENT_RUN}"; then
+			systemctl stop "${SERVICE_NAME}-updater.service" >/dev/null 2>&1 || true
+		fi
 		systemctl disable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+		systemctl disable "${SERVICE_NAME}-updater.service" >/dev/null 2>&1 || true
 	fi
 	SUCCESS=1
 	log WARN "--no-start selected; service files were installed but the service is disabled and stopped"
@@ -500,6 +573,12 @@ else
 			fatal "health check failed after ${START_TIMEOUT}s: ${HEALTH_URL}"
 		}
 	fi
+	systemctl enable "${SERVICE_NAME}-updater.service"
+	if ! systemctl is-active --quiet "${SERVICE_NAME}-updater.service"; then
+		systemctl start "${SERVICE_NAME}-updater.service"
+	elif ! is_true "${UPDATE_AGENT_RUN}"; then
+		systemctl restart "${SERVICE_NAME}-updater.service"
+	fi
 	SUCCESS=1
 	log INFO "service is active and enabled; health_url=${HEALTH_URL} health_skipped=${SKIP_HEALTH}"
 	if [[ "${HAD_DATABASE}" -eq 0 ]]; then
@@ -512,6 +591,7 @@ fi
 
 installed_version=$("${INSTALL_BINARY}" -version 2>&1 | head -n 1)
 log INFO "installed version=${installed_version} binary=${INSTALL_BINARY}"
+log INFO "Web automatic updates: agent=${INSTALL_UPDATER_UNIT} installer=${INSTALL_INSTALLER}"
 log INFO "systemd limits: LimitNOFILE=65536 LimitNPROC=infinity TasksMax=infinity"
 log INFO "database=${DATABASE_PATH} backup=${BACKUP_DIR}"
 log INFO "installer log=${INSTALL_LOG}"

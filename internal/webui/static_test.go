@@ -33,6 +33,9 @@ func TestFrontendUsesWebSocketAndCoalescesRefresh(t *testing.T) {
 		"patchHTML(root,state.servers.map",
 		"const staging=root.cloneNode(false)",
 		"if(value===before)continue",
+		"const updateVisiblePage=!overlayOpen()",
+		"if(updateVisiblePage){render()",
+		"renderAfterOverlayClose()",
 		"window.addEventListener('pagehide',saveHistory)",
 	}
 	for _, check := range checks {
@@ -196,6 +199,11 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 			t.Fatalf("session/chart behavior %q is missing", check)
 		}
 	}
+	for _, check := range []string{"api(updateCheckPath())", "api('/api/update',{method:'POST'", "JSON.stringify({interface:route})", "syncUpdateInterfaces()", "waitForUpdate()", "renderUpdate(update)"} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("automatic update behavior %q is missing", check)
+		}
+	}
 	for _, check := range []string{".chart-canvas-wrap", "max-width:100%", "overflow:hidden", ".settings-layout{align-items:start}"} {
 		if !strings.Contains(css, check) {
 			t.Fatalf("bounded chart/security layout %q is missing", check)
@@ -205,5 +213,13 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 		if !strings.Contains(html, check) {
 			t.Fatalf("chart/session UI %q is missing", check)
 		}
+	}
+	for _, check := range []string{"id=\"check-update\"", "id=\"install-update\"", "id=\"update-current-version\"", "id=\"update-interface\"", "id=\"update-interface-options\""} {
+		if !strings.Contains(html, check) {
+			t.Fatalf("automatic update UI %q is missing", check)
+		}
+	}
+	if !strings.Contains(css, ".update-version-grid") || !strings.Contains(css, ".update-progress") {
+		t.Fatal("automatic update responsive styles are missing")
 	}
 }

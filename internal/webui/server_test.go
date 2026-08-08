@@ -60,6 +60,11 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 		t.Fatalf("unauthenticated interfaces status=%v err=%v", resp.StatusCode, err)
 	}
 	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/api/update")
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated update status=%v err=%v", resp.StatusCode, err)
+	}
+	_ = resp.Body.Close()
 	authBody := []byte(`{"username":"administrator","password":"StrongPassword!42"}`)
 	resp, err = client.Post(ts.URL+"/api/auth/initialize", "application/json", bytes.NewReader(authBody))
 	if err != nil || resp.StatusCode != http.StatusCreated {

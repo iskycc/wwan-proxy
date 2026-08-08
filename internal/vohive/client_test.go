@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,6 +95,55 @@ func TestGetNetworkStatusReusesToken(t *testing.T) {
 	}
 	if _, err := c.GetNetworkStatus(context.Background(), "Y2"); err != nil {
 		t.Fatalf("second call failed: %v", err)
+	}
+	if loginCalls.Load() != 1 {
+		t.Fatalf("expected 1 login call, got %d", loginCalls.Load())
+	}
+}
+
+func TestConcurrentRequestsShareSingleLogin(t *testing.T) {
+	var loginCalls atomic.Int32
+	loginStarted := make(chan struct{})
+	releaseLogin := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/auth/login" {
+			if loginCalls.Add(1) == 1 {
+				close(loginStarted)
+			}
+			<-releaseLogin
+			_ = json.NewEncoder(w).Encode(LoginResponse{
+				ExpiresAt: time.Now().Add(time.Hour), Status: "ok", Token: "shared-token",
+			})
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer shared-token" {
+			t.Errorf("unexpected auth: %s", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(NetworkStatus{Device: "Y2", NetworkConnected: true, Status: "ok"})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "user", "pass", 10*time.Second)
+	const parallel = 8
+	errors := make(chan error, parallel)
+	var wg sync.WaitGroup
+	for range parallel {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.GetNetworkStatus(context.Background(), "Y2")
+			errors <- err
+		}()
+	}
+	<-loginStarted
+	close(releaseLogin)
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent request failed: %v", err)
+		}
 	}
 	if loginCalls.Load() != 1 {
 		t.Fatalf("expected 1 login call, got %d", loginCalls.Load())

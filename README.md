@@ -20,6 +20,7 @@ Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理�
 - 通过会话认证 WebSocket 实时推送 SOCKS5、HTTP/HTTPS、UDP 会话数与流量，以及 GC live heap、系统内存和 goroutine 指标；断线自动退避重连
 - 配置热应用、实例启停、日志搜索、会话管理和故障原因展示
 - WebUI 管理系统设置、管理员凭据、登录设备和数据库迁移
+- WebUI 可检查最新 GitHub Release，并通过本机受限的特权代理完成校验、安装、回滚和服务重启
 - WebUI 通过 `/api/interfaces` 发现本机网口，同时允许手工填写网口名
 
 ## WebUI 预览
@@ -59,6 +60,14 @@ GitHub Actions 会在每次提交到 `main` 后自动执行以下流程：
 4. 创建名为 `build-<12 位提交 SHA>` 的正式 Release，并附带 `SHA256SUMS`。
 
 也可以在仓库的 Actions 页面手动运行同一流程。重复运行同一提交时会更新原 Release 的附件，不会创建重复标签。
+
+### Web 自动更新
+
+Ubuntu、Alpine 和 OpenWrt 的一键安装器会同时安装一个仅监听本机 Unix socket 的 root 更新代理。管理员在 WebUI“设置 → 程序更新”中可以从已保存出口选择下载网口（如 `wwan0`）：Release 检查和安装包下载都会通过 `SO_BINDTODEVICE`/curl `--interface` 绑定该链路；留空则使用系统默认路由。点击“安装更新”后，更新代理调用当前平台的持久安装器，下载对应 amd64/arm64 musl 资产与同一 Release 的 `SHA256SUMS`，校验后原子替换文件，保留 SQLite，并在失败时恢复旧程序和服务定义。安装期间代理服务和管理页面会短暂重启。
+
+该入口仅支持 CI 生成的正式 Release 构建；本地 `dev` 构建、其他 CPU 架构或没有安装更新代理的旧部署不会显示可安装状态。旧部署只需按对应系统重新运行一次一键安装脚本，即可补齐更新代理。更新检查和安装 API 均要求有效管理员会话，Ubuntu/Alpine 的普通 Web 进程没有系统文件写权限。
+
+三个平台的持久安装器也都接受 `--download-interface IFACE`（或 `WWAN_PROXY_DOWNLOAD_INTERFACE`）。OpenWrt 优先使用 curl；原生系统只有 uclient-fetch/BusyBox wget 时，重复更新会自动调用已安装的 wwan-proxy 受限下载器完成网口绑定，无需额外安装 curl。
 
 ### Dante 云 NAT 对照代理
 
@@ -121,6 +130,8 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
 程序        /usr/local/bin/wwan-proxy
 数据库      /var/lib/wwan-proxy/wwan-proxy.db
 OpenRC      /etc/init.d/wwan-proxy
+更新代理    /etc/init.d/wwan-proxy-updater
+持久安装器  /usr/local/libexec/wwan-proxy/install-alpine.sh
 服务配置    /etc/conf.d/wwan-proxy
 服务日志    /var/log/wwan-proxy/service.log
 安装日志    /var/log/wwan-proxy-install.log
@@ -184,52 +195,45 @@ sh install-alpine.sh \
 
 重复执行同一版本是安全的：数据库和现有服务配置不会被覆盖；程序、OpenRC 定义、权限及 capability 均未变化且服务正在运行时，也不会制造无意义的重启。Alpine 其他版本只能在自行验证后显式传入 `--force-os`。
 
-### OpenWrt x86_64
+### OpenWrt x86_64 / aarch64 一键安装
 
 OpenWrt 通常使用 musl。普通 `wwan-proxy-linux-amd64` 是 glibc 动态链接版本，在 OpenWrt 上可能出现 `cannot execute: required file not found`，这是系统缺少 glibc 动态加载器造成的。
 
-在 `uname -m` 输出为 `x86_64` 的 OpenWrt 设备上，请下载 Release 中的：
+以 root 身份运行安装器；它会根据 `uname -m` 自动选择 amd64 或 arm64 musl 包：
+
+```bash
+wget -qO- https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-openwrt.sh | sh
+```
+
+在 `uname -m` 输出为 `x86_64` 的 OpenWrt 设备上，安装器会选择：
 
 ```text
 wwan-proxy-linux-amd64-musl.tar.gz
 ```
 
-该包中的程序通过 musl 完全静态链接，不要求设备安装 glibc 或其他共享库：
-
-```bash
-tar -xzf wwan-proxy-linux-amd64-musl.tar.gz
-cd wwan-proxy-linux-amd64-musl
-chmod +x wwan-proxy
-./wwan-proxy -version
-./wwan-proxy -db ./wwan-proxy.db
-```
+该包中的程序通过 musl 完全静态链接，不要求设备安装 glibc 或其他共享库。重复运行同一命令会检查并更新到最新 Release，同时保留 `/opt/wwan-proxy/wwan-proxy.db`；也可通过 `--version` 固定版本、用 `--download-interface wwan0` 绑定下载链路，或使用 `--archive` 与 `--checksum` 安装本地包。
 
 代理绑定指定物理/虚拟网口仍需要 root 或对应网络能力。若设备输出为 `aarch64`，必须改用 `wwan-proxy-linux-arm64-musl.tar.gz`；普通 `wwan-proxy-linux-arm64.tar.gz` 是 glibc 动态版本，不适用于原生 musl 系统。
 
 ### OpenWrt procd 守护进程
 
-Release 包内包含 `wwan-proxy.init`。脚本使用以下固定路径：
+一键安装器会安装主服务、更新代理和持久安装脚本，使用以下固定路径：
 
 ```text
 工作目录  /opt/wwan-proxy
 程序      /opt/wwan-proxy/wwan-proxy
 数据库    /opt/wwan-proxy/wwan-proxy.db
+安装器    /opt/wwan-proxy/install-openwrt.sh
+主服务    /etc/init.d/wwan-proxy
+更新代理  /etc/init.d/wwan-proxy-updater
 ```
 
-安装或更新时保留已有的 `wwan-proxy.db`：
+安装器在替换程序前停止主服务、备份已有数据库与程序文件，校验新程序可执行后再启动；失败时恢复旧程序和 init 脚本，数据库不会参与自动回滚或删除。常用命令：
 
 ```bash
-mkdir -p /opt/wwan-proxy
-cp ./wwan-proxy /opt/wwan-proxy/wwan-proxy
-chmod 0755 /opt/wwan-proxy/wwan-proxy
-
-cp ./wwan-proxy.init /etc/init.d/wwan-proxy
-chmod 0755 /etc/init.d/wwan-proxy
-
 /etc/init.d/wwan-proxy check
-/etc/init.d/wwan-proxy enable
-/etc/init.d/wwan-proxy start
 /etc/init.d/wwan-proxy status
+/etc/init.d/wwan-proxy-updater status
 ```
 
 脚本由 procd 管理，文件描述符上限为 65535，异常退出后按 `respawn 3600 5 5` 策略重启，停止时最多等待 15 秒。程序以 root 启动，以便使用 `SO_BINDTODEVICE`；没有传入 `-web`，因此 WebUI 监听地址继续以 SQLite 设置为准。
@@ -406,6 +410,8 @@ WebUI 使用以下同源接口：
 | `POST` | `/api/auth/login` | 管理员登录 |
 | `POST` | `/api/auth/logout` | 注销并删除当前会话 |
 | `GET/PUT` | `/api/settings` | 查询或修改系统设置 |
+| `GET` | `/api/update` | 查询本地更新能力与最近更新状态；`?refresh=1&interface=wwan0` 可通过已配置网口检查最新 Release |
+| `POST` | `/api/update` | 安排安装最新 Release；JSON 可传 `{"interface":"wwan0"}` 绑定已配置下载网口 |
 | `PUT` | `/api/admin` | 修改管理员用户名或密码 |
 | `GET` | `/api/sessions` | 查询有效登录会话 |
 | `DELETE` | `/api/sessions/{id}` | 撤销指定登录会话 |
@@ -441,7 +447,9 @@ WebUI 使用以下同源接口：
 curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-ubuntu.sh | sudo bash
 ```
 
-安装器使用经过 `SHA256SUMS` 校验的静态 musl Release，不依赖宿主机 glibc 版本；它会创建 `wwan-proxy` 系统用户、保留并备份 SQLite 数据库、安装 systemd unit、启用服务并检查 `http://127.0.0.1:9090/api/health`。服务使用 `LimitNOFILE=65536`、`LimitNPROC=infinity` 和 `TasksMax=infinity`，同时只授予绑定出口网卡所需的 `CAP_NET_RAW`。
+安装器使用经过 `SHA256SUMS` 校验的静态 musl Release，不依赖宿主机 glibc 版本；它会创建 `wwan-proxy` 系统用户、保留并备份 SQLite 数据库、安装主服务与 root 更新代理、启用服务并检查 `http://127.0.0.1:9090/api/health`。服务使用 `LimitNOFILE=65536`、`LimitNPROC=infinity` 和 `TasksMax=infinity`，同时只授予绑定出口网卡所需的 `CAP_NET_RAW`。重复运行同一安装命令会更新程序和服务文件，不覆盖现有数据库。
+
+需要固定升级下载链路时，可在重复安装时追加 `--download-interface wwan0`；WebUI 中也可直接从已保存出口选择同一网口。
 
 全新安装且 SQLite 尚未保存监听地址时，WebUI 默认监听 `0.0.0.0:9090`，安装后的本机健康检查仍使用 `127.0.0.1`。已有数据库中保存的回环、自定义 IP 或自定义端口不会被安装器覆盖。安装器不会自动开放 UFW、nftables 或云安全组；请仅在可信管理网络放行 TCP/9090，并尽快初始化管理员。安装后可直接访问：
 
@@ -465,13 +473,14 @@ curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/inst
   | sudo bash -s -- --skip-health-check
 ```
 
-固定路径：程序位于 `/usr/local/bin/wwan-proxy`，数据库位于 `/var/lib/wwan-proxy/wwan-proxy.db`，unit 位于 `/etc/systemd/system/wwan-proxy.service`，安装日志位于 `/var/log/wwan-proxy-install.log`，升级备份位于 `/var/backups/wwan-proxy/`。
+固定路径：程序位于 `/usr/local/bin/wwan-proxy`，数据库位于 `/var/lib/wwan-proxy/wwan-proxy.db`，主 unit 位于 `/etc/systemd/system/wwan-proxy.service`，更新代理位于 `/etc/systemd/system/wwan-proxy-updater.service`，持久安装器位于 `/usr/local/libexec/wwan-proxy/install-ubuntu.sh`，安装日志位于 `/var/log/wwan-proxy-install.log`，升级备份位于 `/var/backups/wwan-proxy/`。
 
 常用命令：
 
 ```bash
 systemctl status wwan-proxy
 journalctl -u wwan-proxy -f
+systemctl status wwan-proxy-updater
 ```
 
 ### 手动安装 systemd 服务

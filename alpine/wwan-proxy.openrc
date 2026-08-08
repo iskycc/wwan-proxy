@@ -125,7 +125,7 @@ start_pre() {
 		"${WWAN_PROXY_DATA_DIR}" || return 1
 	checkpath --directory --owner "root:${WWAN_PROXY_GROUP}" --mode 0750 \
 		"${WWAN_PROXY_LOG_DIR}" || return 1
-	checkpath --directory --owner root:root --mode 0755 "${WWAN_PROXY_RUNTIME_DIR}" || return 1
+	checkpath --directory --owner "root:${WWAN_PROXY_GROUP}" --mode 0750 "${WWAN_PROXY_RUNTIME_DIR}" || return 1
 	checkpath --file --owner "${WWAN_PROXY_USER}:${WWAN_PROXY_GROUP}" --mode 0640 \
 		"${WWAN_PROXY_LOG_DIR}/service.log" || return 1
 	validate_installation

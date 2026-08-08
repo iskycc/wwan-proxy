@@ -15,9 +15,11 @@ import (
 
 func TestVohiveHeartbeatRecordsDegradedAndRecovered(t *testing.T) {
 	callCount := 0
+	loginCount := 0
 	vohiveServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost && r.URL.Path == "/api/auth/login" {
+			loginCount++
 			_ = json.NewEncoder(w).Encode(vohive.LoginResponse{
 				ExpiresAt: time.Now().Add(time.Hour), Status: "ok", Token: "test-token",
 			})
@@ -42,9 +44,17 @@ func TestVohiveHeartbeatRecordsDegradedAndRecovered(t *testing.T) {
 	defer cleanup()
 	defer st.Close()
 	defer m.Close()
+	for _, inst := range m.instances {
+		if inst.vohiveClient != m.vohiveHealth.client {
+			t.Fatal("heartbeat and per-instance recovery must share one Vohive token cache")
+		}
+	}
 
 	m.runOneVohiveHeartbeatTick(context.Background())
 	m.runOneVohiveHeartbeatTick(context.Background())
+	if loginCount != 1 {
+		t.Fatalf("expected heartbeat client to reuse one login token, got %d logins", loginCount)
+	}
 
 	events, err := st.ListVohiveEvents(context.Background(), store.ListVohiveEventsOptions{DeviceID: "Y2"})
 	if err != nil {

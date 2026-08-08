@@ -17,8 +17,11 @@ ALPINE_WEB_DEFAULT="0.0.0.0:9090"
 
 INSTALL_BINARY="/usr/local/bin/wwan-proxy"
 INSTALL_INIT="/etc/init.d/wwan-proxy"
+INSTALL_UPDATER_INIT="/etc/init.d/wwan-proxy-updater"
 INSTALL_CONF="/etc/conf.d/wwan-proxy"
 INSTALL_LOGROTATE="/etc/logrotate.d/wwan-proxy"
+INSTALLER_DIR="/usr/local/libexec/wwan-proxy"
+INSTALL_INSTALLER="${INSTALLER_DIR}/install-alpine.sh"
 DATA_DIR="/var/lib/wwan-proxy"
 DATABASE_PATH="${DATA_DIR}/wwan-proxy.db"
 SERVICE_LOG_DIR="/var/log/wwan-proxy"
@@ -31,6 +34,7 @@ REPOSITORY="${WWAN_PROXY_REPOSITORY:-${DEFAULT_REPOSITORY}}"
 RELEASE_VERSION="${WWAN_PROXY_VERSION:-latest}"
 LOCAL_ARCHIVE="${WWAN_PROXY_ARCHIVE:-}"
 LOCAL_CHECKSUMS="${WWAN_PROXY_CHECKSUMS:-}"
+DOWNLOAD_INTERFACE="${WWAN_PROXY_DOWNLOAD_INTERFACE:-}"
 HEALTH_URL="${WWAN_PROXY_HEALTH_URL:-}"
 HEALTH_URL_EXPLICIT=0
 [ -n "${HEALTH_URL}" ] && HEALTH_URL_EXPLICIT=1
@@ -38,6 +42,7 @@ NO_START="${WWAN_PROXY_NO_START:-0}"
 FORCE_OS="${WWAN_PROXY_FORCE_OS:-0}"
 START_TIMEOUT="${WWAN_PROXY_START_TIMEOUT:-30}"
 FIREWALL_MODE="${WWAN_PROXY_FIREWALL:-open}"
+UPDATE_AGENT_RUN="${WWAN_PROXY_UPDATE_AGENT:-0}"
 
 RUN_ID="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
 CURRENT_STEP="bootstrap"
@@ -50,8 +55,12 @@ ROLLBACK_READY=0
 ROLLBACK_ACTIVE=0
 PREVIOUS_RUNNING=0
 PREVIOUS_ENABLED=0
+PREVIOUS_UPDATER_RUNNING=0
+PREVIOUS_UPDATER_ENABLED=0
 HAD_BINARY=0
 HAD_INIT=0
+HAD_UPDATER_INIT=0
+HAD_INSTALLER=0
 HAD_CONF=0
 HAD_LOGROTATE=0
 HAD_DATABASE=0
@@ -63,6 +72,8 @@ INSTALLED_VERSION="unknown"
 BACKUP_DIR=""
 BINARY_STAGE=""
 INIT_STAGE=""
+UPDATER_INIT_STAGE=""
+INSTALLER_STAGE=""
 FIREWALL_TRANSACTION=""
 FIREWALL_TRANSACTION_ACTIVE=0
 FIREWALL_ZONE=""
@@ -100,6 +111,8 @@ Options:
   --repo OWNER/REPO      GitHub repository (default: iskycc/wwan-proxy)
   --archive FILE         Install a local release archive
   --checksum FILE        SHA256SUMS for --archive (required with --archive)
+  --download-interface IFACE
+                         Bind GitHub metadata and package downloads to IFACE
   --health-url URL       Post-start health endpoint
   --start-timeout SEC    Start/health timeout, 5-300 seconds (default: 30)
   --open-firewall        Inspect the firewall and open the WebUI TCP port
@@ -113,13 +126,15 @@ Options:
 
 Environment equivalents:
   WWAN_PROXY_VERSION, WWAN_PROXY_REPOSITORY, WWAN_PROXY_ARCHIVE,
-  WWAN_PROXY_CHECKSUMS, WWAN_PROXY_HEALTH_URL, WWAN_PROXY_START_TIMEOUT,
+  WWAN_PROXY_CHECKSUMS, WWAN_PROXY_DOWNLOAD_INTERFACE,
+  WWAN_PROXY_HEALTH_URL, WWAN_PROXY_START_TIMEOUT,
   WWAN_PROXY_NO_START, WWAN_PROXY_FORCE_OS,
   WWAN_PROXY_FIREWALL (open, check, or skip; default: open)
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/iskycc/wwan-proxy/main/scripts/install-alpine.sh | sh
   sh install-alpine.sh --version build-0123456789ab
+  sh install-alpine.sh --download-interface wwan0
   sh install-alpine.sh --check-firewall
   sh install-alpine.sh --archive ./wwan-proxy-linux-amd64-musl.tar.gz --checksum ./SHA256SUMS
 
@@ -148,6 +163,11 @@ while [ "$#" -gt 0 ]; do
 		--checksum|--checksums)
 			[ "$#" -ge 2 ] || { echo "${PROGRAM_NAME}: --checksum requires a value" >&2; exit 2; }
 			LOCAL_CHECKSUMS=$2
+			shift 2
+			;;
+		--download-interface)
+			[ "$#" -ge 2 ] || { echo "${PROGRAM_NAME}: --download-interface requires a value" >&2; exit 2; }
+			DOWNLOAD_INTERFACE=$2
 			shift 2
 			;;
 		--health-url)
@@ -1669,6 +1689,8 @@ rollback_installation() {
 	rollback_failed=0
 	restore_file "${HAD_BINARY}" "${WORK_DIR}/rollback/wwan-proxy" "${INSTALL_BINARY}" || rollback_failed=1
 	restore_file "${HAD_INIT}" "${WORK_DIR}/rollback/wwan-proxy.openrc" "${INSTALL_INIT}" || rollback_failed=1
+	restore_file "${HAD_UPDATER_INIT}" "${WORK_DIR}/rollback/wwan-proxy-updater.openrc" "${INSTALL_UPDATER_INIT}" || rollback_failed=1
+	restore_file "${HAD_INSTALLER}" "${WORK_DIR}/rollback/install-alpine.sh" "${INSTALL_INSTALLER}" || rollback_failed=1
 	restore_file "${HAD_CONF}" "${WORK_DIR}/rollback/wwan-proxy.confd" "${INSTALL_CONF}" || rollback_failed=1
 	restore_file "${HAD_LOGROTATE}" "${WORK_DIR}/rollback/wwan-proxy.logrotate" "${INSTALL_LOGROTATE}" || rollback_failed=1
 	if [ "${HAD_BINARY}" -eq 1 ] && [ -n "${OLD_BINARY_CAP}" ]; then
@@ -1676,6 +1698,9 @@ rollback_installation() {
 	fi
 	if [ "${PREVIOUS_ENABLED}" -eq 0 ]; then
 		rc-update del "${SERVICE_NAME}" default >>"${INSTALL_LOG}" 2>&1 || true
+	fi
+	if [ "${PREVIOUS_UPDATER_ENABLED}" -eq 0 ]; then
+		rc-update del "${SERVICE_NAME}-updater" default >>"${INSTALL_LOG}" 2>&1 || true
 	fi
 	if [ "${PREVIOUS_RUNNING}" -eq 1 ] && [ "${HAD_BINARY}" -eq 1 ] && [ "${HAD_INIT}" -eq 1 ]; then
 		if rc-service "${SERVICE_NAME}" start >>"${INSTALL_LOG}" 2>&1; then
@@ -1706,6 +1731,12 @@ on_exit() {
 	esac
 	case "${INIT_STAGE}" in
 		/etc/init.d/.wwan-proxy.install-*) rm -f -- "${INIT_STAGE}" 2>/dev/null || true ;;
+	esac
+	case "${UPDATER_INIT_STAGE}" in
+		/etc/init.d/.wwan-proxy-updater.install-*) rm -f -- "${UPDATER_INIT_STAGE}" 2>/dev/null || true ;;
+	esac
+	case "${INSTALLER_STAGE}" in
+		/usr/local/libexec/wwan-proxy/.install-alpine.install-*) rm -f -- "${INSTALLER_STAGE}" 2>/dev/null || true ;;
 	esac
 	safe_remove_work_dir
 	if [ "${LOCK_HELD}" -eq 1 ]; then
@@ -1777,6 +1808,11 @@ if [ -n "${HEALTH_URL}" ]; then
 	case "${HEALTH_URL}" in
 		*://*@*|*\?*|*\#*) fatal "health URL must not contain credentials, query parameters or fragments" ;;
 	esac
+fi
+if [ -n "${DOWNLOAD_INTERFACE}" ]; then
+	case "${DOWNLOAD_INTERFACE}" in *[!A-Za-z0-9_.:-]*|"") fatal "invalid download interface: ${DOWNLOAD_INTERFACE}" ;; esac
+	[ "${#DOWNLOAD_INTERFACE}" -le 15 ] || fatal "download interface exceeds 15 bytes: ${DOWNLOAD_INTERFACE}"
+	[ -d "/sys/class/net/${DOWNLOAD_INTERFACE}" ] || fatal "download interface does not exist: ${DOWNLOAD_INTERFACE}"
 fi
 
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
@@ -1893,13 +1929,19 @@ download_file() {
 	download_description=$1
 	download_url=$2
 	download_target=$3
-	run_step "${download_description}" curl \
+	set -- curl \
+		--disable \
 		--fail-with-body --location --show-error --silent \
 		--retry 3 --retry-all-errors --retry-delay 2 \
-		--connect-timeout 15 --max-time 300 \
+		--connect-timeout 15 --max-time 300
+	if [ -n "${DOWNLOAD_INTERFACE}" ]; then
+		set -- "$@" --interface "${DOWNLOAD_INTERFACE}"
+	fi
+	set -- "$@" \
 		--output "${download_target}" \
 		--write-out 'http_code=%{http_code} remote_ip=%{remote_ip} bytes=%{size_download} time=%{time_total}s effective_url=%{url_effective}\n' \
 		"${download_url}"
+	run_step "${download_description}" "$@"
 }
 
 if [ -n "${LOCAL_ARCHIVE}" ]; then
@@ -1992,9 +2034,14 @@ fi
 
 SOURCE_BINARY="${PACKAGE_ROOT}/wwan-proxy"
 SOURCE_INIT="${PACKAGE_ROOT}/wwan-proxy.openrc"
+SOURCE_UPDATER_INIT="${PACKAGE_ROOT}/wwan-proxy-updater.openrc"
 SOURCE_CONF="${PACKAGE_ROOT}/wwan-proxy.confd"
 SOURCE_LOGROTATE="${PACKAGE_ROOT}/wwan-proxy.logrotate"
-for required_file in "${SOURCE_BINARY}" "${SOURCE_INIT}" "${SOURCE_CONF}" "${SOURCE_LOGROTATE}"; do
+SOURCE_INSTALLER="${PACKAGE_ROOT}/install-alpine.sh"
+for required_file in \
+	"${SOURCE_BINARY}" "${SOURCE_INIT}" "${SOURCE_UPDATER_INIT}" \
+	"${SOURCE_CONF}" "${SOURCE_LOGROTATE}" "${SOURCE_INSTALLER}"
+do
 	[ -f "${required_file}" ] || fatal "release package is incomplete; missing ${required_file##*/}"
 done
 [ -x "${SOURCE_BINARY}" ] || fatal "release binary is not executable: ${SOURCE_BINARY}"
@@ -2004,6 +2051,8 @@ INSTALLED_VERSION=$("${SOURCE_BINARY}" -version 2>&1 | head -n 1)
 log_line INFO "staged_binary_version=${INSTALLED_VERSION} staged_binary_sha256=$(sha256sum "${SOURCE_BINARY}" | awk '{print $1}')"
 
 run_step "validate Alpine OpenRC script syntax" sh -n "${SOURCE_INIT}" || fatal "packaged OpenRC script has invalid shell syntax"
+run_step "validate Alpine updater script syntax" sh -n "${SOURCE_UPDATER_INIT}" || fatal "packaged updater OpenRC script has invalid shell syntax"
+run_step "validate persistent installer syntax" sh -n "${SOURCE_INSTALLER}" || fatal "packaged Alpine installer has invalid shell syntax"
 
 validate_fixed_conf_value() {
 	conf_key=$1
@@ -2027,7 +2076,8 @@ validate_fixed_conf_value() {
 }
 
 for protected_target in \
-	"${INSTALL_BINARY}" "${INSTALL_INIT}" "${INSTALL_CONF}" "${INSTALL_LOGROTATE}" \
+	"${INSTALL_BINARY}" "${INSTALL_INIT}" "${INSTALL_UPDATER_INIT}" "${INSTALL_INSTALLER}" \
+	"${INSTALLER_DIR}" "${INSTALL_CONF}" "${INSTALL_LOGROTATE}" \
 	"${DATABASE_PATH}" "${DATABASE_PATH}-wal" "${DATABASE_PATH}-shm" \
 	"${DATA_DIR}" "${SERVICE_LOG_DIR}" "${SERVICE_LOG}" /run/wwan-proxy "${BACKUP_ROOT}"
 do
@@ -2038,6 +2088,8 @@ done
 
 assert_root_controlled_file "${INSTALL_BINARY}" "installed binary"
 assert_root_controlled_file "${INSTALL_INIT}" "OpenRC init script"
+assert_root_controlled_file "${INSTALL_UPDATER_INIT}" "updater OpenRC init script"
+assert_root_controlled_file "${INSTALL_INSTALLER}" "persistent installer"
 assert_root_controlled_file "${INSTALL_CONF}" "OpenRC configuration"
 SERVICE_FILES_TRUSTED=1
 
@@ -2057,12 +2109,16 @@ fi
 
 if rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then PREVIOUS_RUNNING=1; fi
 if rc-update show default 2>/dev/null | grep -Eq "(^|[[:space:]])${SERVICE_NAME}([[:space:]]|$)"; then PREVIOUS_ENABLED=1; fi
+if rc-service "${SERVICE_NAME}-updater" status >/dev/null 2>&1; then PREVIOUS_UPDATER_RUNNING=1; fi
+if rc-update show default 2>/dev/null | grep -Eq "(^|[[:space:]])${SERVICE_NAME}-updater([[:space:]]|$)"; then PREVIOUS_UPDATER_ENABLED=1; fi
 [ -f "${INSTALL_BINARY}" ] && HAD_BINARY=1
 [ -f "${INSTALL_INIT}" ] && HAD_INIT=1
+[ -f "${INSTALL_UPDATER_INIT}" ] && HAD_UPDATER_INIT=1
+[ -f "${INSTALL_INSTALLER}" ] && HAD_INSTALLER=1
 [ -f "${INSTALL_CONF}" ] && HAD_CONF=1
 [ -f "${INSTALL_LOGROTATE}" ] && HAD_LOGROTATE=1
 [ -f "${DATABASE_PATH}" ] && HAD_DATABASE=1
-log_line INFO "previous_state running=${PREVIOUS_RUNNING} enabled=${PREVIOUS_ENABLED} binary=${HAD_BINARY} database=${HAD_DATABASE}"
+log_line INFO "previous_state running=${PREVIOUS_RUNNING} enabled=${PREVIOUS_ENABLED} updater_running=${PREVIOUS_UPDATER_RUNNING} updater_enabled=${PREVIOUS_UPDATER_ENABLED} binary=${HAD_BINARY} database=${HAD_DATABASE}"
 
 if [ "${HAD_BINARY}" -eq 1 ]; then
 	cp -p "${INSTALL_BINARY}" "${WORK_DIR}/rollback/wwan-proxy" >>"${INSTALL_LOG}" 2>&1 || fatal "could not back up installed binary"
@@ -2070,6 +2126,12 @@ if [ "${HAD_BINARY}" -eq 1 ]; then
 fi
 if [ "${HAD_INIT}" -eq 1 ]; then
 	cp -p "${INSTALL_INIT}" "${WORK_DIR}/rollback/wwan-proxy.openrc" >>"${INSTALL_LOG}" 2>&1 || fatal "could not back up OpenRC script"
+fi
+if [ "${HAD_UPDATER_INIT}" -eq 1 ]; then
+	cp -p "${INSTALL_UPDATER_INIT}" "${WORK_DIR}/rollback/wwan-proxy-updater.openrc" >>"${INSTALL_LOG}" 2>&1 || fatal "could not back up updater OpenRC script"
+fi
+if [ "${HAD_INSTALLER}" -eq 1 ]; then
+	cp -p "${INSTALL_INSTALLER}" "${WORK_DIR}/rollback/install-alpine.sh" >>"${INSTALL_LOG}" 2>&1 || fatal "could not back up persistent installer"
 fi
 if [ "${HAD_CONF}" -eq 1 ]; then
 	cp -p "${INSTALL_CONF}" "${WORK_DIR}/rollback/wwan-proxy.confd" >>"${INSTALL_LOG}" 2>&1 || fatal "could not back up OpenRC configuration"
@@ -2092,13 +2154,15 @@ case "${SERVICE_UID}" in
 	0) fatal "refusing to run wwan-proxy with UID 0" ;;
 esac
 
-run_step "create persistent data, log, runtime and backup directories" \
-	mkdir -p "${DATA_DIR}" "${SERVICE_LOG_DIR}" /run/wwan-proxy "${BACKUP_ROOT}" || fatal "could not create service directories"
+run_step "create persistent data, log, runtime, installer and backup directories" \
+	mkdir -p "${DATA_DIR}" "${SERVICE_LOG_DIR}" /run/wwan-proxy "${INSTALLER_DIR}" "${BACKUP_ROOT}" || fatal "could not create service directories"
 run_step "set data directory ownership" chown wwan-proxy:wwan-proxy "${DATA_DIR}" || fatal "could not set data directory ownership"
 run_step "secure service log directory ownership" chown root:wwan-proxy "${SERVICE_LOG_DIR}" || fatal "could not secure service log directory ownership"
 run_step "set service directory permissions" chmod 0750 "${DATA_DIR}" "${SERVICE_LOG_DIR}" || fatal "could not set directory permissions"
-chown root:root /run/wwan-proxy "${BACKUP_ROOT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not secure runtime or backup directory"
-chmod 0755 /run/wwan-proxy >>"${INSTALL_LOG}" 2>&1 || fatal "could not set runtime directory permissions"
+chown root:wwan-proxy /run/wwan-proxy >>"${INSTALL_LOG}" 2>&1 || fatal "could not secure runtime directory"
+chmod 0750 /run/wwan-proxy >>"${INSTALL_LOG}" 2>&1 || fatal "could not set runtime directory permissions"
+chown root:root "${INSTALLER_DIR}" "${BACKUP_ROOT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not secure installer or backup directory"
+chmod 0755 "${INSTALLER_DIR}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not set installer directory permissions"
 chmod 0700 "${BACKUP_ROOT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not set backup directory permissions"
 if [ -L "${SERVICE_LOG}" ] || { [ -e "${SERVICE_LOG}" ] && [ ! -f "${SERVICE_LOG}" ]; }; then
 	fatal "service log must be a regular file and not a symbolic link: ${SERVICE_LOG}"
@@ -2118,8 +2182,12 @@ done
 
 BINARY_CHANGED=1
 INIT_CHANGED=1
+UPDATER_INIT_CHANGED=1
+INSTALLER_CHANGED=1
 if [ "${HAD_BINARY}" -eq 1 ] && cmp -s "${SOURCE_BINARY}" "${INSTALL_BINARY}"; then BINARY_CHANGED=0; fi
 if [ "${HAD_INIT}" -eq 1 ] && cmp -s "${SOURCE_INIT}" "${INSTALL_INIT}"; then INIT_CHANGED=0; fi
+if [ "${HAD_UPDATER_INIT}" -eq 1 ] && cmp -s "${SOURCE_UPDATER_INIT}" "${INSTALL_UPDATER_INIT}"; then UPDATER_INIT_CHANGED=0; fi
+if [ "${HAD_INSTALLER}" -eq 1 ] && cmp -s "${SOURCE_INSTALLER}" "${INSTALL_INSTALLER}"; then INSTALLER_CHANGED=0; fi
 
 CAPABILITY_OK=0
 if [ "${HAD_BINARY}" -eq 1 ] && getcap "${INSTALL_BINARY}" 2>/dev/null | grep -Eq '(^|[[:space:]])cap_net_raw([=,+]|,)'; then
@@ -2133,7 +2201,7 @@ fi
 if [ "${BINARY_CHANGED}" -eq 1 ] || [ "${INIT_CHANGED}" -eq 1 ] || [ "${CAPABILITY_OK}" -eq 0 ] || [ "${BINARY_METADATA_OK}" -eq 0 ]; then
 	FILES_REQUIRE_RESTART=1
 fi
-log_line INFO "change_plan binary_changed=${BINARY_CHANGED} init_changed=${INIT_CHANGED} capability_ok=${CAPABILITY_OK} metadata_ok=${BINARY_METADATA_OK}"
+log_line INFO "change_plan binary_changed=${BINARY_CHANGED} init_changed=${INIT_CHANGED} updater_init_changed=${UPDATER_INIT_CHANGED} installer_changed=${INSTALLER_CHANGED} capability_ok=${CAPABILITY_OK} metadata_ok=${BINARY_METADATA_OK}"
 
 if [ "${PREVIOUS_RUNNING}" -eq 1 ] && [ "${FILES_REQUIRE_RESTART}" -eq 1 ]; then
 	run_step "stop existing wwan-proxy service" rc-service "${SERVICE_NAME}" stop || fatal "could not stop the existing service safely"
@@ -2176,6 +2244,28 @@ if [ "${INIT_CHANGED}" -eq 1 ]; then
 else
 	chown root:root "${INSTALL_INIT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not repair OpenRC script ownership"
 	chmod 0755 "${INSTALL_INIT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not repair OpenRC script permissions"
+fi
+
+if [ "${UPDATER_INIT_CHANGED}" -eq 1 ]; then
+	UPDATER_INIT_STAGE="/etc/init.d/.wwan-proxy-updater.install-${RUN_ID}"
+	cp "${SOURCE_UPDATER_INIT}" "${UPDATER_INIT_STAGE}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not stage updater OpenRC script"
+	chown root:root "${UPDATER_INIT_STAGE}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not set updater OpenRC script ownership"
+	chmod 0755 "${UPDATER_INIT_STAGE}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not set updater OpenRC script permissions"
+	mv -f "${UPDATER_INIT_STAGE}" "${INSTALL_UPDATER_INIT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not publish updater OpenRC script"
+else
+	chown root:root "${INSTALL_UPDATER_INIT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not repair updater OpenRC script ownership"
+	chmod 0755 "${INSTALL_UPDATER_INIT}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not repair updater OpenRC script permissions"
+fi
+
+if [ "${INSTALLER_CHANGED}" -eq 1 ]; then
+	INSTALLER_STAGE="${INSTALLER_DIR}/.install-alpine.install-${RUN_ID}"
+	cp "${SOURCE_INSTALLER}" "${INSTALLER_STAGE}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not stage persistent installer"
+	chown root:root "${INSTALLER_STAGE}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not set persistent installer ownership"
+	chmod 0755 "${INSTALLER_STAGE}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not set persistent installer permissions"
+	mv -f "${INSTALLER_STAGE}" "${INSTALL_INSTALLER}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not publish persistent installer"
+else
+	chown root:root "${INSTALL_INSTALLER}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not repair persistent installer ownership"
+	chmod 0755 "${INSTALL_INSTALLER}" >>"${INSTALL_LOG}" 2>&1 || fatal "could not repair persistent installer permissions"
 fi
 
 if [ ! -e "${INSTALL_CONF}" ]; then
@@ -2233,15 +2323,19 @@ if is_true "${NO_START}"; then
 	CURRENT_STEP="complete"
 	ROLLBACK_READY=0
 	SUCCESS=1
-	log_line WARN "--no-start selected; service was not enabled or started, and firewall inspection or changes were deferred"
+	log_line WARN "--no-start selected; services were not enabled or started, and firewall inspection or changes were deferred"
 	log_line INFO "installed version=${INSTALLED_VERSION} binary=${INSTALL_BINARY}"
-	log_line INFO "enable later: rc-update add ${SERVICE_NAME} default && rc-service ${SERVICE_NAME} start"
+	log_line INFO "enable later: rc-update add ${SERVICE_NAME} default && rc-update add ${SERVICE_NAME}-updater default && rc-service ${SERVICE_NAME} start && rc-service ${SERVICE_NAME}-updater start"
 	log_line INFO "complete log: ${INSTALL_LOG}"
 	exit 0
 fi
 
 if [ "${PREVIOUS_ENABLED}" -eq 0 ]; then
 	run_step "enable wwan-proxy in the default OpenRC runlevel" rc-update add "${SERVICE_NAME}" default || fatal "could not enable the OpenRC service"
+fi
+
+if [ "${PREVIOUS_UPDATER_ENABLED}" -eq 0 ]; then
+	run_step "enable updater in the default OpenRC runlevel" rc-update add "${SERVICE_NAME}-updater" default || fatal "could not enable the updater OpenRC service"
 fi
 
 if [ "${PREVIOUS_RUNNING}" -eq 1 ] && [ "${FILES_REQUIRE_RESTART}" -eq 0 ]; then
@@ -2320,6 +2414,14 @@ if ! configure_host_firewall; then
 	# remotely reachable installation when the requested open mode was not met.
 	ROLLBACK_READY=0
 	fatal "service installation succeeded, but remote WebUI firewall access could not be confirmed; the service was kept running and ${INSTALL_LOG} contains the required manual action"
+fi
+
+if ! rc-service "${SERVICE_NAME}-updater" status >/dev/null 2>&1; then
+	run_step "start wwan-proxy updater" rc-service "${SERVICE_NAME}-updater" start || fatal "OpenRC could not start the updater"
+elif ! is_true "${UPDATE_AGENT_RUN}" && { [ "${BINARY_CHANGED}" -eq 1 ] || [ "${UPDATER_INIT_CHANGED}" -eq 1 ] || [ "${INSTALLER_CHANGED}" -eq 1 ]; }; then
+	run_step "restart wwan-proxy updater" rc-service "${SERVICE_NAME}-updater" restart || fatal "OpenRC could not restart the updater"
+else
+	log_line INFO "updater is already running; restart is delegated to supervise-daemon when applicable"
 fi
 
 CURRENT_STEP="complete"

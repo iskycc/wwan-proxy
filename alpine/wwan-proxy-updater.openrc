@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+# shellcheck disable=SC2034
+
+name="wwan-proxy-updater"
+description="Privileged local update agent for wwan-proxy"
+
+WWAN_PROXY_BINARY="/usr/local/bin/wwan-proxy"
+WWAN_PROXY_INSTALLER="/usr/local/libexec/wwan-proxy/install-alpine.sh"
+WWAN_PROXY_RUNTIME_DIR="/run/wwan-proxy"
+WWAN_PROXY_LOG_DIR="/var/log/wwan-proxy"
+
+supervisor="supervise-daemon"
+command="${WWAN_PROXY_BINARY}"
+command_args="-update-agent -update-platform alpine -update-group wwan-proxy -update-installer ${WWAN_PROXY_INSTALLER} -update-binary ${WWAN_PROXY_BINARY}"
+command_user="root:root"
+directory="/var/lib/wwan-proxy"
+pidfile="${WWAN_PROXY_RUNTIME_DIR}/updater-supervise-daemon.pid"
+output_log="${WWAN_PROXY_LOG_DIR}/service.log"
+error_log="${WWAN_PROXY_LOG_DIR}/service.log"
+umask="0007"
+respawn_delay="2"
+respawn_max="0"
+respawn_period="60"
+retry="SIGTERM/10/SIGKILL/5"
+required_files="${WWAN_PROXY_BINARY} ${WWAN_PROXY_INSTALLER}"
+
+depend() {
+	need net
+	after wwan-proxy
+}
+
+start_pre() {
+	id wwan-proxy >/dev/null 2>&1 || return 1
+	checkpath --directory --owner root:wwan-proxy --mode 0750 "${WWAN_PROXY_RUNTIME_DIR}" || return 1
+	checkpath --directory --owner root:wwan-proxy --mode 0750 "${WWAN_PROXY_LOG_DIR}" || return 1
+	[ -x "${WWAN_PROXY_BINARY}" ] && [ -x "${WWAN_PROXY_INSTALLER}" ]
+}

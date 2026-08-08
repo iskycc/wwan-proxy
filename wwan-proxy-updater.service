@@ -1,0 +1,23 @@
+[Unit]
+Description=Privileged update agent for wwan-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0007
+RuntimeDirectory=wwan-proxy
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/wwan-proxy -update-agent -update-platform ubuntu -update-group wwan-proxy -update-installer /usr/local/libexec/wwan-proxy/install-ubuntu.sh -update-binary /usr/local/bin/wwan-proxy
+Restart=always
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

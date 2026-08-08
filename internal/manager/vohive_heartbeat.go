@@ -13,6 +13,7 @@ import (
 
 type vohiveHealthState struct {
 	mu           sync.RWMutex
+	client       *vohive.Client
 	devices      map[string]vohive.DeviceHealth
 	fastUntil    time.Time
 	fastRefCount int
@@ -23,7 +24,9 @@ func (m *Manager) startVohiveHeartbeat(settings config.VohiveSettings) {
 	if !settings.Enabled || settings.BaseURL == "" {
 		return
 	}
-	state := &vohiveHealthState{}
+	state := &vohiveHealthState{
+		client: m.sharedVohiveClient(settings),
+	}
 	m.vohiveHealth = state
 
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -46,13 +49,21 @@ func (m *Manager) startVohiveHeartbeat(settings config.VohiveSettings) {
 	}()
 }
 
+func (m *Manager) sharedVohiveClient(settings config.VohiveSettings) *vohive.Client {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.vohiveClient == nil || m.vohiveClientSettings.BaseURL != settings.BaseURL || m.vohiveClientSettings.Username != settings.Username || m.vohiveClientSettings.Password != settings.Password {
+		m.vohiveClient = vohive.NewClient(settings.BaseURL, settings.Username, settings.Password, 30*time.Second)
+		m.vohiveClientSettings = settings
+	}
+	return m.vohiveClient
+}
+
 func (m *Manager) runOneVohiveHeartbeatTick(ctx context.Context) {
 	if m.vohiveHealth == nil {
 		return
 	}
-	settings := m.vohiveSettings()
-	client := vohive.NewClient(settings.BaseURL, settings.Username, settings.Password, 30*time.Second)
-	health, err := client.GetHealth(ctx)
+	health, err := m.vohiveHealth.client.GetHealth(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

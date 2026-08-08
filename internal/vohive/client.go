@@ -22,6 +22,7 @@ type Client struct {
 	password string
 	http     *http.Client
 
+	loginMu   sync.Mutex
 	mu        sync.Mutex
 	token     string
 	expiresAt time.Time
@@ -90,6 +91,11 @@ func deviceNetworkPath(deviceID string) string {
 }
 
 func (c *Client) ensureToken(ctx context.Context) error {
+	// Serialize authentication so simultaneous API calls do not all observe an
+	// empty/expiring token and create a burst of login requests.
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+
 	c.mu.Lock()
 	needsLogin := c.token == "" || time.Until(c.expiresAt) <= 10*time.Second
 	c.mu.Unlock()
@@ -178,8 +184,12 @@ func (c *Client) requestWithRetry(ctx context.Context, method, path string, body
 	// If the token was rejected, clear it and retry once after re-authenticating.
 	if resp.StatusCode == http.StatusUnauthorized && allowRetry {
 		c.mu.Lock()
-		c.token = ""
-		c.expiresAt = zeroTime
+		// Another request may already have refreshed the token while this request
+		// was in flight. Do not discard that newer token.
+		if c.token == token {
+			c.token = ""
+			c.expiresAt = zeroTime
+		}
 		c.mu.Unlock()
 		return c.requestWithRetry(ctx, method, path, body, false)
 	}
