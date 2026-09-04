@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"golang.org/x/crypto/bcrypt"
 
 	"wwan-proxy/internal/config"
 	"wwan-proxy/internal/manager"
@@ -138,6 +139,73 @@ func TestOverviewWebSocketAuthenticationPushRefreshAndLogout(t *testing.T) {
 	readCancel()
 	if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("logout should close WebSocket with policy violation, status=%v err=%v", websocket.CloseStatus(err), err)
+	}
+}
+
+func TestWebSocketOverviewSamplesAreSharedWithinPushInterval(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "websocket-cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	managerContext, managerCancel := context.WithCancel(context.Background())
+	defer managerCancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := manager.New(managerContext, st, logger)
+	defer mgr.Close()
+	ui := New("127.0.0.1:0", st, mgr, logger)
+	ui.websocketInterval = time.Hour
+	defer ui.websocketCancel()
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("StrongPassword!42"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAdmin(context.Background(), "administrator", passwordHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSession(context.Background(), "shared-session", "127.0.0.1", "test", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := ui.websocketOverviewData(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ui.websocketOverviewData(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSample, firstOK := first["sampled_at"].(time.Time)
+	secondSample, secondOK := second["sampled_at"].(time.Time)
+	if !firstOK || !secondOK || !firstSample.Equal(secondSample) {
+		t.Fatalf("overview sample was not shared: first=%v second=%v", first["sampled_at"], second["sampled_at"])
+	}
+
+	time.Sleep(time.Millisecond)
+	forced, err := ui.websocketOverviewData(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forcedSample, ok := forced["sampled_at"].(time.Time)
+	if !ok || !forcedSample.After(firstSample) {
+		t.Fatalf("forced overview sample was not refreshed: first=%v forced=%v", firstSample, forced["sampled_at"])
+	}
+
+	valid, err := ui.validateWebSocketSession(context.Background(), "shared-session")
+	if err != nil || !valid {
+		t.Fatalf("initial session validation valid=%v err=%v", valid, err)
+	}
+	if err := st.DeleteSession(context.Background(), "shared-session"); err != nil {
+		t.Fatal(err)
+	}
+	valid, err = ui.validateWebSocketSession(context.Background(), "shared-session")
+	if err != nil || !valid {
+		t.Fatalf("session validation cache was not reused valid=%v err=%v", valid, err)
+	}
+	ui.invalidateWebSocketSession("shared-session")
+	valid, err = ui.validateWebSocketSession(context.Background(), "shared-session")
+	if err != nil || valid {
+		t.Fatalf("invalidated session cache valid=%v err=%v", valid, err)
 	}
 }
 

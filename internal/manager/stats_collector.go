@@ -68,31 +68,21 @@ func (c *statsCollector) collect(ctx context.Context) {
 
 	snapshots := c.m.Snapshots()
 	rows := make([]store.ServerStats, 0, len(snapshots))
-	currentIDs := make(map[int64]struct{}, len(snapshots))
 	now := time.Now().UTC()
 	for _, snap := range snapshots {
-		currentIDs[snap.ID] = struct{}{}
 		cur := counterSnapshot{
 			startedAt:   snap.StartedAt,
 			metrics:     snap.Metrics,
 			httpMetrics: snap.HTTPMetrics,
 		}
 		prev := c.last[snap.ID]
-		if !prev.startedAt.IsZero() && !prev.startedAt.Equal(cur.startedAt) {
-			prev = counterSnapshot{}
-		}
 		hb := heartbeats[snap.ID]
-		row := computeStatsDelta(snap.ID, cur, prev, snap.Metrics.ActiveConnections, hb.Healthy, hb.LatencyMS)
+		active := snap.Metrics.ActiveConnections + snap.HTTPMetrics.ActiveRequests
+		row := computeStatsDelta(snap.ID, cur, prev, active, hb.Healthy, hb.LatencyMS)
 		row.Bucket = now.Truncate(time.Minute)
 		row.InstanceStartedAt = snap.StartedAt
 		rows = append(rows, row)
 		c.last[snap.ID] = cur
-	}
-
-	for id := range c.last {
-		if _, ok := currentIDs[id]; !ok {
-			delete(c.last, id)
-		}
 	}
 
 	if err := c.m.store.SaveServerStats(ctx, rows); err != nil {
@@ -105,6 +95,20 @@ func (c *statsCollector) collect(ctx context.Context) {
 			c.log.Warn("failed to prune server stats", "error", err)
 		} else {
 			c.log.Info("pruned server stats", "rows", n)
+		}
+		settings, settingsErr := c.m.store.SystemSettings(ctx)
+		if settingsErr != nil {
+			c.log.Warn("failed to load retention settings", "error", settingsErr)
+		} else {
+			retention := time.Duration(settings.LogRetentionDays) * 24 * time.Hour
+			if err := c.m.store.PruneLogs(ctx, now.Add(-retention)); err != nil {
+				c.log.Warn("failed to prune event logs", "error", err)
+			}
+			if n, err := c.m.store.PruneVohiveEvents(ctx, retention); err != nil {
+				c.log.Warn("failed to prune Vohive events", "error", err)
+			} else {
+				c.log.Info("pruned Vohive events", "rows", n)
+			}
 		}
 		c.prune = now
 	}

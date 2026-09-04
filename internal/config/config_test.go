@@ -153,6 +153,7 @@ func TestNormalizeBootstrapDNSAddress(t *testing.T) {
 	tests := map[string]string{
 		"114.114.114.114":     "114.114.114.114:53",
 		"[2001:db8::53]:5353": "[2001:db8::53]:5353",
+		"[fe80::53%wwan0]:53": "[fe80::53%wwan0]:53",
 		"127.0.0.1:1053":      "127.0.0.1:1053",
 	}
 	for input, want := range tests {
@@ -165,6 +166,20 @@ func TestNormalizeBootstrapDNSAddress(t *testing.T) {
 		if _, err := NormalizeBootstrapDNSAddress(invalid); err == nil {
 			t.Fatalf("invalid bootstrap DNS %q accepted", invalid)
 		}
+	}
+}
+
+func TestTraditionalDNSServerRequiresIPLiteral(t *testing.T) {
+	cfg := Server{
+		Name: "test", Listen: "127.0.0.1:1080", Interface: "lo", Auth: Auth{Method: "none"},
+		DNS: DNS{Servers: []string{"resolver.example:53"}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DNS server IP") {
+		t.Fatalf("hostname DNS server was accepted: %v", err)
+	}
+	cfg.DNS.Servers = []string{"192.0.2.53:53", "[2001:db8::53]:5353"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("IP literal DNS servers were rejected: %v", err)
 	}
 }
 

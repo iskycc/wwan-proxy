@@ -60,6 +60,7 @@ type Server struct {
 	limiter   *policy.Limiter
 	access    *policy.Access
 	clients   *policy.IPLimiter
+	auth      *proxyauth.Verifier
 
 	mu           sync.Mutex
 	listener     net.Listener
@@ -92,6 +93,7 @@ func NewWithLimiters(cfg config.Server, logger *slog.Logger, dial DialContext, l
 	s.access, _ = policy.NewAccess(cfg.Access)
 	s.clients = clients
 	s.limiter = limiter
+	s.auth = proxyauth.NewVerifier(cfg.Auth.Users)
 	timeout := cfg.ConnectTimeout.Value(10 * time.Second)
 	s.transport = &http.Transport{
 		Proxy:                 nil,
@@ -312,7 +314,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	username, password, ok := strings.Cut(string(raw), ":")
-	if !ok || !proxyauth.VerifyUser(s.cfg.Auth.Users, username, password) {
+	if !ok || !s.auth.Verify(username, password) {
 		proxyAuthRequired(w)
 		return false
 	}

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>WWAN Control</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="auth-pending">
@@ -64,7 +65,7 @@
     <main>
       <header class="topbar">
         <div><p class="eyebrow" id="page-eyebrow">NETWORK OVERVIEW</p><h1 id="page-title">连接，一目了然。</h1></div>
-        <div class="top-actions"><span class="last-update" id="last-update">正在同步…</span><button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11m16 2-2.4 4.6A7 7 0 0 1 5.8 15"/></svg></button><button class="primary-button" id="add-button"><span>＋</span> 新建出口</button><div class="account-menu"><button class="account-button" id="account-button"><span id="account-avatar">A</span><b id="account-name">Admin</b><i>⌄</i></button><div class="account-dropdown" id="account-dropdown"><div><span>已安全登录</span><strong id="account-detail">Admin</strong></div><button id="logout-button">退出登录 <span>⇥</span></button></div></div></div>
+        <div class="top-actions"><span class="last-update" id="last-update">正在同步…</span><button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11m16 2-2.4 4.6A7 7 0 0 1 5.8 15"/></svg></button><button class="primary-button" id="add-button" aria-label="新建出口"><span aria-hidden="true">＋</span> 新建出口</button><div class="account-menu"><button class="account-button" id="account-button" aria-label="账户菜单"><span id="account-avatar">A</span><b id="account-name">Admin</b><i aria-hidden="true">⌄</i></button><div class="account-dropdown" id="account-dropdown"><div><span>已安全登录</span><strong id="account-detail">Admin</strong></div><button id="logout-button">退出登录 <span aria-hidden="true">⇥</span></button></div></div></div>
       </header>
 
       <section class="page active" id="page-overview">
@@ -105,14 +106,14 @@
 
       <section class="page" id="page-logs">
         <div class="panel glass-card">
-          <div class="panel-head log-head"><div><p class="eyebrow">PERSISTENT EVENTS</p><h3>运行日志</h3></div><div class="log-filters"><select class="native-select" id="log-level"><option>ALL</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option></select><input id="log-search" placeholder="搜索消息、实例或错误原因"><button class="secondary-button" id="log-refresh">刷新</button></div></div>
+          <div class="panel-head log-head"><div><p class="eyebrow">PERSISTENT EVENTS</p><h3>运行日志</h3></div><div class="log-filters"><select class="native-select" id="log-level" aria-label="日志级别"><option>ALL</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option></select><input id="log-search" aria-label="搜索日志" placeholder="搜索消息、实例或错误原因"><button class="secondary-button" id="log-refresh">刷新</button></div></div>
           <div class="log-list" id="log-list"><div class="empty-state">暂无日志</div></div>
         </div>
       </section>
 
       <section class="page" id="page-vohive-events">
         <div class="panel glass-card">
-          <div class="panel-head log-head"><div><p class="eyebrow">RECOVERY EVENTS</p><h3>事件</h3></div><div class="log-filters"><select class="native-select" id="vohive-event-type"><option value="">全部类型</option><option value="degraded">链路异常</option><option value="recovery_started">恢复开始</option><option value="recovery_succeeded">恢复成功</option><option value="recovery_failed">恢复失败</option><option value="recovered">已恢复</option></select><div class="filter-chips" id="vohive-event-device-filters"></div><button class="secondary-button" id="vohive-events-refresh">刷新</button></div></div>
+          <div class="panel-head log-head"><div><p class="eyebrow">RECOVERY EVENTS</p><h3>事件</h3></div><div class="log-filters"><select class="native-select" id="vohive-event-type" aria-label="事件类型"><option value="">全部类型</option><option value="degraded">链路异常</option><option value="recovery_started">恢复开始</option><option value="recovery_succeeded">恢复成功</option><option value="recovery_failed">恢复失败</option><option value="recovered">已恢复</option></select><div class="filter-chips" id="vohive-event-device-filters"></div><button class="secondary-button" id="vohive-events-refresh">刷新</button></div></div>
           <div class="log-list" id="vohive-event-list"><div class="empty-state">暂无 Vohive 事件</div></div>
         </div>
       </section>
@@ -122,7 +123,7 @@
           <div class="panel-head log-head">
             <div><p class="eyebrow">HISTORICAL STATISTICS</p><h3>统计</h3></div>
             <div class="log-filters stats-filters">
-              <select class="native-select" id="stats-server"><option value="0">全部出口</option></select>
+              <select class="native-select" id="stats-server" aria-label="统计出口"><option value="0">全部出口</option></select>
               <div class="filter-chips" id="stats-range">
                 <button type="button" class="filter-chip selected" data-range="24h">24 小时</button>
                 <button type="button" class="filter-chip" data-range="7d">7 天</button>
@@ -157,7 +158,7 @@
         <div class="settings-layout">
           <form class="panel glass-card settings-panel" id="system-settings-form">
             <div class="panel-head"><div><p class="eyebrow">SYSTEM SETTINGS</p><h3>系统设置</h3></div><span class="settings-badge" id="restart-badge">即时生效</span></div>
-            <p class="settings-copy">日志和会话时长保存后立即生效；监听地址与数据库位置将在安全重启后生效。</p>
+            <p class="settings-copy">日志和会话时长保存后立即生效；监听地址、数据库位置与 Vohive 设置将在安全重启后生效。</p>
             <div class="settings-fields">
               <label>WebUI 监听地址<input required name="web_listen" placeholder="127.0.0.1:9090"><small>修改后需要重启服务</small></label>
               <label>SQLite 数据库路径<input required name="database_path" placeholder="/var/lib/wwan-proxy/wwan-proxy.db"><small id="database-path-note">必须使用绝对路径，重启时自动迁移</small></label>
@@ -168,7 +169,7 @@
 
             <div class="vohive-section" id="vohive-settings-panel">
               <div class="panel-head"><div><p class="eyebrow">VOHIVE RECOVERY</p><h3>设备网络自动恢复</h3></div><span class="settings-badge" id="vohive-badge">未启用</span></div>
-              <p class="settings-copy">当出口心跳连续失败时，通过 Vohive API 重启指定设备的移动数据网络。</p>
+              <p class="settings-copy">当出口心跳连续失败时，通过 Vohive API 重启指定设备的移动数据网络。修改后需要重启 wwan-proxy。</p>
               <div class="settings-fields">
                 <label class="toggle-label span-2"><input type="checkbox" name="vohive_enabled"><span></span>启用 Vohive 自动恢复</label>
                 <label class="vohive-field span-2">Vohive Base URL<input name="vohive_base_url" placeholder="http://192.168.8.88:7575"><small>包含协议和端口</small></label>
@@ -232,8 +233,8 @@
   </div>
 
   <div class="modal-backdrop" id="modal">
-    <form class="modal glass-card" id="config-form">
-      <div class="modal-head"><div><p class="eyebrow">SERVER CONFIGURATION</p><h3 id="modal-title">新建出口</h3></div><button type="button" class="icon-button" id="modal-close">×</button></div>
+    <form class="modal glass-card" id="config-form" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-head"><div><p class="eyebrow">SERVER CONFIGURATION</p><h3 id="modal-title">新建出口</h3></div><button type="button" class="icon-button" id="modal-close" aria-label="关闭配置窗口">×</button></div>
       <input type="hidden" name="id">
       <div class="form-grid">
         <div class="form-section-heading span-2"><i>01</i><div><strong>基础设置</strong><span>SOCKS5、HTTP/HTTPS Proxy、出口网口与连接限制</span></div></div>

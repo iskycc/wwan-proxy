@@ -504,6 +504,9 @@ func (s *Server) Validate() error {
 		if _, _, err := net.SplitHostPort(server); err != nil {
 			return fmt.Errorf("dns.servers[%d] must include a port: %w", i, err)
 		}
+		if _, err := NormalizeBootstrapDNSAddress(server); err != nil {
+			return fmt.Errorf("dns.servers[%d]: %w", i, err)
+		}
 	}
 	if s.DNS.DoH != nil {
 		doh := s.DNS.DoH
@@ -806,12 +809,27 @@ func NormalizeBootstrapDNSAddress(server string) (string, error) {
 		return net.JoinHostPort(ip.String(), "53"), nil
 	}
 	host, port, err := net.SplitHostPort(server)
-	if err != nil || net.ParseIP(host) == nil {
+	if err != nil {
+		return "", fmt.Errorf("must be a DNS server IP with optional port")
+	}
+	ipHost, zone := host, ""
+	if separator := strings.LastIndexByte(host, '%'); separator >= 0 {
+		if separator == 0 || separator == len(host)-1 {
+			return "", fmt.Errorf("must be a DNS server IP with optional port")
+		}
+		ipHost, zone = host[:separator], host[separator+1:]
+	}
+	ip := net.ParseIP(ipHost)
+	if ip == nil || (zone != "" && ip.To4() != nil) {
 		return "", fmt.Errorf("must be a DNS server IP with optional port")
 	}
 	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || n == 0 {
 		return "", fmt.Errorf("must use a port between 1 and 65535")
 	}
-	return net.JoinHostPort(net.ParseIP(host).String(), port), nil
+	canonicalHost := ip.String()
+	if zone != "" {
+		canonicalHost += "%" + zone
+	}
+	return net.JoinHostPort(canonicalHost, port), nil
 }

@@ -54,6 +54,11 @@ func TestRestartRequiredUsesPersistedStartupBaseline(t *testing.T) {
 	if !ui.settingsResponse(settings).RestartRequired {
 		t.Fatal("changed database path did not require restart")
 	}
+	settings.DatabasePath = st.Path()
+	settings.Vohive.Enabled = !ui.startupVohive.Enabled
+	if !ui.settingsResponse(settings).RestartRequired {
+		t.Fatal("changed Vohive settings did not require restart")
+	}
 }
 
 func TestSaveSettingsAppliesLogLevelImmediately(t *testing.T) {

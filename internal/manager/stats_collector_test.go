@@ -189,3 +189,30 @@ func TestStatsCollectorUnderflowGuard(t *testing.T) {
 		t.Errorf("underflow TotalRequests=%d, want 5", row.TotalRequests)
 	}
 }
+
+func TestMetricHandoffKeepsCountersMonotonic(t *testing.T) {
+	carry := generationMetrics{
+		socks: socks5.MetricsSnapshot{TotalConnections: 10, TCPUploadBytes: 1000},
+		http:  httpproxy.MetricsSnapshot{TotalRequests: 20, UploadBytes: 2000},
+	}
+	retiringDelta := generationMetrics{
+		socks: subtractSocksMetrics(
+			socks5.MetricsSnapshot{TotalConnections: 13, TCPUploadBytes: 1400},
+			socks5.MetricsSnapshot{TotalConnections: 10, TCPUploadBytes: 1000},
+		),
+		http: subtractHTTPMetrics(
+			httpproxy.MetricsSnapshot{TotalRequests: 25, UploadBytes: 2600},
+			httpproxy.MetricsSnapshot{TotalRequests: 20, UploadBytes: 2000},
+		),
+	}
+	currentSocks := addSocksMetrics(socks5.MetricsSnapshot{TotalConnections: 2, TCPUploadBytes: 200}, carry.socks)
+	currentSocks = addSocksMetrics(currentSocks, retiringDelta.socks)
+	currentHTTP := addHTTPMetrics(httpproxy.MetricsSnapshot{TotalRequests: 4, UploadBytes: 400}, carry.http)
+	currentHTTP = addHTTPMetrics(currentHTTP, retiringDelta.http)
+	if currentSocks.TotalConnections != 15 || currentSocks.TCPUploadBytes != 1600 {
+		t.Fatalf("SOCKS handoff totals=%+v", currentSocks)
+	}
+	if currentHTTP.TotalRequests != 29 || currentHTTP.UploadBytes != 3000 {
+		t.Fatalf("HTTP handoff totals=%+v", currentHTTP)
+	}
+}

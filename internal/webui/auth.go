@@ -118,7 +118,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
-		_ = s.store.DeleteSession(r.Context(), hashToken(cookie.Value))
+		tokenHash := hashToken(cookie.Value)
+		_ = s.store.DeleteSession(r.Context(), tokenHash)
+		s.invalidateWebSocketSession(tokenHash)
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
 	s.log.Info("WebUI logout", "remote", clientIP(r))

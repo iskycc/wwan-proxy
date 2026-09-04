@@ -236,3 +236,44 @@ func TestFrontendEnforcesSessionExpiryAndBoundsCharts(t *testing.T) {
 		t.Fatal("software update panel must be below administrator security in the settings side column")
 	}
 }
+
+func TestFrontendMobileActionsAndDialogsStayAccessible(t *testing.T) {
+	jsContent, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssContent, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlContent, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, css, html := string(jsContent), string(cssContent), string(htmlContent)
+	for _, check := range []string{
+		"selectAccessibleName(select)", "select.setAttribute('aria-hidden','true')", "trapOverlayFocus(event", "syncOverlayInert()",
+		"f.scrollTop=0", "f.elements.name.focus({preventScroll:true})", "returnFocus.focus({preventScroll:true})",
+		"item.setAttribute('aria-label'", "matchMedia('(prefers-reduced-motion: reduce)').matches",
+	} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("accessible interaction behavior %q is missing", check)
+		}
+	}
+	for _, check := range []string{
+		".nav-item,.nav-item.active{flex:1 1 0;min-width:0", "#add-button{display:grid", "env(safe-area-inset-bottom)",
+	} {
+		if !strings.Contains(css, check) {
+			t.Fatalf("mobile action layout %q is missing", check)
+		}
+	}
+	for _, check := range []string{
+		`rel="icon" href="/favicon.svg"`, `role="dialog" aria-modal="true" aria-labelledby="modal-title"`,
+		`id="modal-close" aria-label="关闭配置窗口"`, `id="log-level" aria-label="日志级别"`,
+		`id="log-search" aria-label="搜索日志"`, `id="stats-server" aria-label="统计出口"`,
+	} {
+		if !strings.Contains(html, check) {
+			t.Fatalf("accessible markup %q is missing", check)
+		}
+	}
+}

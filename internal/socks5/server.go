@@ -49,6 +49,7 @@ type Server struct {
 	clients          *policy.IPLimiter
 	udpClients       *policy.IPLimiter
 	udpLimiter       *policy.Limiter
+	auth             *proxyauth.Verifier
 	metrics          metricCounters
 }
 
@@ -85,6 +86,7 @@ func NewWithAllLimiters(cfg config.Server, logger *slog.Logger, limiter *policy.
 	s.udpClients = udpClients
 	s.udpLimiter = udpLimiter
 	s.limiter = limiter
+	s.auth = proxyauth.NewVerifier(cfg.Auth.Users)
 	s.resolver = s.newResolver()
 	return s
 }
@@ -371,7 +373,7 @@ func (s *Server) passwordAuth(c net.Conn) error {
 	if _, err := io.ReadFull(c, p); err != nil {
 		return err
 	}
-	valid := proxyauth.VerifyUser(s.cfg.Auth.Users, string(u), string(p))
+	valid := s.auth.Verify(string(u), string(p))
 	status := byte(0)
 	if !valid {
 		status = 1
@@ -604,15 +606,22 @@ func (s *Server) newResolver() *net.Resolver {
 	}
 	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 		d := s.dialerWithoutResolver()
-		var last error
-		for _, addr := range s.cfg.DNS.Servers {
-			c, err := d.DialContext(ctx, network, addr)
+		connections := make([]net.Conn, 0, len(s.cfg.DNS.Servers))
+		var failures []error
+		for i, addr := range s.cfg.DNS.Servers {
+			attemptContext, cancel := dividedAttemptContext(ctx, len(s.cfg.DNS.Servers)-i)
+			c, err := d.DialContext(attemptContext, network, addr)
+			cancel()
 			if err == nil {
-				return c, nil
+				connections = append(connections, c)
+				continue
 			}
-			last = err
+			failures = append(failures, fmt.Errorf("DNS server %s: %w", addr, err))
 		}
-		return nil, last
+		if len(connections) == 0 {
+			return nil, errors.Join(failures...)
+		}
+		return newRacingDNSConn(network, connections), nil
 	}}
 }
 

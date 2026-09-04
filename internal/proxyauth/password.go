@@ -1,9 +1,13 @@
 package proxyauth
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"hash"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -53,4 +57,62 @@ func VerifyUser(users map[string]string, username, password string) bool {
 	}
 	valid := Verify(stored, password)
 	return exists && valid
+}
+
+// Verifier caches only successful credential checks for one immutable server
+// configuration generation. The cached value is keyed with process memory
+// entropy, so neither plaintext passwords nor reusable unsalted password
+// digests are retained. Invalid credentials still take the full bcrypt path to
+// avoid turning the cache into a username oracle.
+type Verifier struct {
+	users        map[string]string
+	key          [32]byte
+	cacheEnabled bool
+
+	mu      sync.RWMutex
+	allowed map[string][32]byte
+	macs    sync.Pool
+}
+
+func NewVerifier(users map[string]string) *Verifier {
+	v := &Verifier{users: users, allowed: make(map[string][32]byte, len(users))}
+	_, err := rand.Read(v.key[:])
+	v.cacheEnabled = err == nil
+	if v.cacheEnabled {
+		v.macs.New = func() any { return hmac.New(sha256.New, v.key[:]) }
+	}
+	return v
+}
+
+func (v *Verifier) Verify(username, password string) bool {
+	if v == nil || !v.cacheEnabled {
+		if v == nil {
+			return false
+		}
+		return VerifyUser(v.users, username, password)
+	}
+	digest := v.credentialDigest(password)
+	v.mu.RLock()
+	cached, ok := v.allowed[username]
+	v.mu.RUnlock()
+	if ok && hmac.Equal(cached[:], digest[:]) {
+		return true
+	}
+	if !VerifyUser(v.users, username, password) {
+		return false
+	}
+	v.mu.Lock()
+	v.allowed[username] = digest
+	v.mu.Unlock()
+	return true
+}
+
+func (v *Verifier) credentialDigest(password string) [32]byte {
+	mac := v.macs.Get().(hash.Hash)
+	mac.Reset()
+	_, _ = mac.Write([]byte(password))
+	var digest [32]byte
+	_ = mac.Sum(digest[:0])
+	v.macs.Put(mac)
+	return digest
 }

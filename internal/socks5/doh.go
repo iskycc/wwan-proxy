@@ -21,14 +21,15 @@ import (
 )
 
 type dohResolver struct {
-	providers []*dohProvider
-	headers   map[string]string
-	timeout   time.Duration
-	context   context.Context
-	cancel    context.CancelFunc
-	cacheMu   sync.Mutex
-	cache     map[string]dnsCacheEntry
-	inflight  map[string]*dnsFlight
+	providers  []*dohProvider
+	headers    map[string]string
+	timeout    time.Duration
+	context    context.Context
+	cancel     context.CancelFunc
+	cacheMu    sync.Mutex
+	cache      map[string]dnsCacheEntry
+	cacheBytes int
+	inflight   map[string]*dnsFlight
 }
 
 type dohProvider struct {
@@ -118,6 +119,7 @@ func (s *Server) newDoHResolver(cfg config.DoH) *net.Resolver {
 		doh.cancel()
 		doh.cacheMu.Lock()
 		clear(doh.cache)
+		doh.cacheBytes = 0
 		doh.cacheMu.Unlock()
 		for _, provider := range doh.providers {
 			for _, upstream := range provider.upstreams {

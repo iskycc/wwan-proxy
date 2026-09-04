@@ -316,6 +316,43 @@ func TestAPIInputPreservesStructuredUnchangedPassword(t *testing.T) {
 	}
 }
 
+func TestAPIInputPreservesEmptyUpstreamPasswordOnUpdate(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	cfg := testServer("upstream-password", "127.0.0.1:11091")
+	cfg.Upstream = config.Upstream{
+		Enabled: true, Address: "127.0.0.1:1080", AuthMethod: "username_password",
+		Username: "relay", Password: "upstream-secret",
+	}
+	if err := s.SaveServerInput(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Name = "upstream-password-edited"
+	cfg.Upstream.Password = ""
+	if err := s.SaveServerInput(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.GetServer(context.Background(), cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Upstream.Password != "upstream-secret" {
+		t.Fatalf("upstream password was not preserved: %q", stored.Upstream.Password)
+	}
+}
+
+func TestNewUpstreamStillRequiresPassword(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	cfg := testServer("new-upstream-password", "127.0.0.1:11092")
+	cfg.Upstream = config.Upstream{
+		Enabled: true, Address: "127.0.0.1:1080", AuthMethod: "username_password", Username: "relay",
+	}
+	if err := s.SaveServerInput(context.Background(), &cfg); err == nil {
+		t.Fatal("new upstream accepted an empty password")
+	}
+}
+
 func TestLegacyServerJSONReceivesAccessAndBindDefaults(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

@@ -24,6 +24,8 @@ type Manager struct {
 
 	mu              sync.RWMutex
 	instances       map[int64]*instance
+	metricCarry     map[int64]generationMetrics
+	retiringMetrics map[int64]map[*instance]generationMetrics
 	transition      sync.Mutex
 	drainMu         sync.Mutex
 	draining        map[*instance]context.CancelFunc
@@ -123,6 +125,7 @@ func New(ctx context.Context, st *store.Store, logger *slog.Logger) *Manager {
 	m := &Manager{
 		store: st, log: logger.With("component", "manager"), ctx: ctx,
 		instances: make(map[int64]*instance), draining: make(map[*instance]context.CancelFunc),
+		metricCarry: make(map[int64]generationMetrics), retiringMetrics: make(map[int64]map[*instance]generationMetrics),
 		preflightDevice: defaultDevicePreflight,
 	}
 	m.vohiveReload = m.Reload
@@ -250,10 +253,12 @@ func (m *Manager) Reload(_ context.Context, id int64) error {
 	if !cfg.Enabled {
 		m.mu.Lock()
 		if m.instances[id] == old {
+			m.beginMetricHandoffLocked(old)
 			delete(m.instances, id)
 		}
 		m.mu.Unlock()
 		m.shutdownInstance(old)
+		m.finishMetricHandoff(old)
 		return nil
 	}
 
@@ -269,6 +274,7 @@ func (m *Manager) Reload(_ context.Context, id int64) error {
 		m.shutdownInstance(replacement)
 		return fmt.Errorf("server instance %d changed during reload", id)
 	}
+	m.beginMetricHandoffLocked(old)
 	m.instances[id] = replacement
 	m.mu.Unlock()
 	m.launch(replacement)
@@ -532,12 +538,22 @@ func (m *Manager) stop(id int64) {
 	defer m.transition.Unlock()
 	m.mu.Lock()
 	inst := m.instances[id]
+	if inst != nil {
+		m.beginMetricHandoffLocked(inst)
+	}
 	delete(m.instances, id)
 	m.mu.Unlock()
 	if inst == nil {
 		return
 	}
 	m.shutdownInstance(inst)
+	m.finishMetricHandoff(inst)
+	// Remove is used for permanent deletion, unlike a disabled configuration
+	// that may later be re-enabled with the same ID.
+	m.mu.Lock()
+	delete(m.metricCarry, id)
+	delete(m.retiringMetrics, id)
+	m.mu.Unlock()
 }
 
 func (m *Manager) shutdownInstance(inst *instance) {
@@ -587,6 +603,7 @@ func (m *Manager) scheduleDrain(inst *instance) {
 		defer m.drainWG.Done()
 		defer cancel()
 		m.drainInstance(ctx, inst)
+		m.finishMetricHandoff(inst)
 		m.drainMu.Lock()
 		delete(m.draining, inst)
 		m.drainMu.Unlock()
@@ -627,8 +644,23 @@ func (m *Manager) Snapshots() []InstanceSnapshot {
 		if inst.httpProxy != nil {
 			httpMetrics = inst.httpProxy.Metrics()
 		}
+		socksMetrics := inst.server.Metrics()
+		carry := m.metricCarry[inst.cfg.ID]
+		socksMetrics = addSocksMetrics(socksMetrics, carry.socks)
+		httpMetrics = addHTTPMetrics(httpMetrics, carry.http)
+		for retiring, base := range m.retiringMetrics[inst.cfg.ID] {
+			retiringSocks := retiring.server.Metrics()
+			socksMetrics = addSocksMetrics(socksMetrics, subtractSocksMetrics(retiringSocks, base.socks))
+			socksMetrics.ActiveConnections += retiringSocks.ActiveConnections
+			socksMetrics.ActiveUDP += retiringSocks.ActiveUDP
+			if retiring.httpProxy != nil {
+				retiringHTTP := retiring.httpProxy.Metrics()
+				httpMetrics = addHTTPMetrics(httpMetrics, subtractHTTPMetrics(retiringHTTP, base.http))
+				httpMetrics.ActiveRequests += retiringHTTP.ActiveRequests
+			}
+		}
 		running := inst.socksRunning && (!inst.cfg.HTTPProxy.Enabled || inst.httpRunning)
-		snap := InstanceSnapshot{ID: inst.cfg.ID, Name: inst.cfg.Name, Enabled: true, Running: running, Listen: inst.cfg.Listen, Interface: inst.cfg.Interface, StartedAt: inst.startedAt, LastError: inst.lastError, Metrics: inst.server.Metrics(), HTTPListen: inst.cfg.HTTPProxy.Listen, HTTPRunning: inst.httpRunning, HTTPMetrics: httpMetrics}
+		snap := InstanceSnapshot{ID: inst.cfg.ID, Name: inst.cfg.Name, Enabled: true, Running: running, Listen: inst.cfg.Listen, Interface: inst.cfg.Interface, StartedAt: inst.startedAt, LastError: inst.lastError, Metrics: socksMetrics, HTTPListen: inst.cfg.HTTPProxy.Listen, HTTPRunning: inst.httpRunning, HTTPMetrics: httpMetrics}
 		inst.mu.RUnlock()
 		result = append(result, snap)
 	}

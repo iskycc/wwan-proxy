@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -604,6 +605,63 @@ func TestDoHCacheCoalescesConcurrentMisses(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("concurrent cache misses made %d upstream requests, want 1", requests.Load())
+	}
+}
+
+func TestDoHCacheIsBounded(t *testing.T) {
+	d := &dohResolver{cache: make(map[string]dnsCacheEntry), inflight: make(map[string]*dnsFlight)}
+	for i := 0; i < maxDNSCacheEntries+32; i++ {
+		query, err := buildDNSAQuery(fmt.Sprintf("cache-%d.test", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = d.cachedQuery(context.Background(), query, func(_ context.Context, wire []byte) ([]byte, error) {
+			return dnsTestResponseIPv4(wire, [4]byte{192, 0, 2, 88})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(d.cache) > maxDNSCacheEntries {
+		t.Fatalf("cache entries=%d, maximum=%d", len(d.cache), maxDNSCacheEntries)
+	}
+	if d.cacheBytes > maxDNSCacheBytes {
+		t.Fatalf("cache bytes=%d, maximum=%d", d.cacheBytes, maxDNSCacheBytes)
+	}
+	actualBytes := 0
+	for _, entry := range d.cache {
+		actualBytes += len(entry.response)
+	}
+	if d.cacheBytes != actualBytes {
+		t.Fatalf("tracked cache bytes=%d, actual=%d", d.cacheBytes, actualBytes)
+	}
+}
+
+func TestTraditionalDNSUsesResponsiveConfiguredServer(t *testing.T) {
+	dead, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddress := dead.LocalAddr().String()
+	_ = dead.Close()
+	goodAddress, queries := startBootstrapDNS(t, [4]byte{192, 0, 2, 77})
+	srv := New(config.Server{
+		Interface: "lo", ConnectTimeout: config.Duration(time.Second),
+		DNS: config.DNS{IPv4Only: true, Servers: []string{deadAddress, goodAddress}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ips, err := srv.lookupIPv4(ctx, "traditional-failover.test")
+	if err != nil {
+		t.Fatalf("%v (secondary queries=%d)", err, queries.total.Load())
+	}
+	if len(ips) != 1 || !ips[0].Equal(net.IPv4(192, 0, 2, 77)) {
+		t.Fatalf("resolved addresses=%v", ips)
+	}
+	if queries.total.Load() == 0 {
+		t.Fatal("responsive secondary DNS server received no query")
 	}
 }
 

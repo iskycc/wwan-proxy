@@ -68,6 +68,7 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "apply login session lifetime", err)
 		return
 	}
+	s.invalidateAllWebSocketSessions()
 	s.refreshSessionCookie(w, r)
 	if s.logLevelSetter != nil {
 		// Validation above guarantees this update cannot fail for the built-in
@@ -89,7 +90,9 @@ func (s *Server) settingsResponse(settings config.SystemSettings) settingsRespon
 		CurrentWebListen:    s.http.Addr,
 		CurrentDatabasePath: s.store.Path(),
 		StartupDatabasePath: s.store.BootstrapPath(),
-		RestartRequired:     settings.WebListen != s.startupWebListen || filepath.Clean(settings.DatabasePath) != s.startupDatabasePath,
+		RestartRequired: settings.WebListen != s.startupWebListen ||
+			filepath.Clean(settings.DatabasePath) != s.startupDatabasePath ||
+			settings.Vohive != s.startupVohive,
 	}
 }
 
@@ -135,6 +138,7 @@ func (s *Server) updateAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.DeleteOtherSessions(r.Context(), currentSessionHash(r))
+	s.invalidateWebSocketSessionsExcept(currentSessionHash(r))
 	s.log.Warn("administrator credentials updated", "username", username, "remote", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"username": username})
 }
@@ -168,6 +172,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "revoke WebUI session", err)
 		return
 	}
+	s.invalidateWebSocketSession(id)
 	if id == currentSessionHash(r) {
 		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
 	}
@@ -176,10 +181,12 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteOtherSessions(r.Context(), currentSessionHash(r)); err != nil {
+	current := currentSessionHash(r)
+	if err := s.store.DeleteOtherSessions(r.Context(), current); err != nil {
 		s.internalError(w, r, "revoke other WebUI sessions", err)
 		return
 	}
+	s.invalidateWebSocketSessionsExcept(current)
 	s.log.Warn("other WebUI sessions revoked", "remote", clientIP(r))
 	w.WriteHeader(http.StatusNoContent)
 }

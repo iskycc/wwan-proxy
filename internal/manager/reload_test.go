@@ -54,6 +54,60 @@ func TestReloadHandsOffListenerWithoutClosingEstablishedSOCKSConnection(t *testi
 	_ = oldConn.Close()
 }
 
+func TestReloadSnapshotsKeepRetiringGenerationMetrics(t *testing.T) {
+	m, st, cfg, echo := newReloadTestManager(t)
+	defer st.Close()
+	defer echo.Close()
+	defer m.Close()
+	if err := m.StartAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForSOCKSListener(t, cfg.Listen)
+	oldConn := dialSOCKSEcho(t, cfg.Listen, echo.Addr().(*net.TCPAddr))
+	assertEcho(t, oldConn, "before-reload")
+	before := m.Snapshots()[0]
+
+	cfg.MaxConnections = 64
+	if err := st.SaveServer(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Reload(context.Background(), cfg.ID); err != nil {
+		t.Fatal(err)
+	}
+	newConn := dialSOCKSEcho(t, cfg.Listen, echo.Addr().(*net.TCPAddr))
+	assertEcho(t, newConn, "after-reload")
+	during := m.Snapshots()[0]
+	if during.Metrics.TotalConnections < before.Metrics.TotalConnections+1 {
+		t.Fatalf("connection counter went backward across reload: before=%d during=%d", before.Metrics.TotalConnections, during.Metrics.TotalConnections)
+	}
+	if during.Metrics.TCPUploadBytes < before.Metrics.TCPUploadBytes+uint64(len("after-reload")) {
+		t.Fatalf("upload counter lost a generation: before=%d during=%d", before.Metrics.TCPUploadBytes, during.Metrics.TCPUploadBytes)
+	}
+	if during.Metrics.ActiveConnections < 2 {
+		t.Fatalf("active connections omitted retiring generation: %d", during.Metrics.ActiveConnections)
+	}
+
+	_ = oldConn.Close()
+	_ = newConn.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		m.mu.RLock()
+		remaining := len(m.retiringMetrics[cfg.ID])
+		m.mu.RUnlock()
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retiring metrics were not folded into the carry")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	after := m.Snapshots()[0]
+	if after.Metrics.TotalConnections < during.Metrics.TotalConnections || after.Metrics.TCPUploadBytes < during.Metrics.TCPUploadBytes {
+		t.Fatalf("counters dropped after drain: during=%+v after=%+v", during.Metrics, after.Metrics)
+	}
+}
+
 func TestReloadCompletesAfterCallerContextIsCanceled(t *testing.T) {
 	m, st, cfg, echo := newReloadTestManager(t)
 	defer st.Close()

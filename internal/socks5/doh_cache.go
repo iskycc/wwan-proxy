@@ -15,6 +15,11 @@ type dnsCacheEntry struct {
 	expires  time.Time
 }
 
+const (
+	maxDNSCacheEntries = 2048
+	maxDNSCacheBytes   = 8 * 1024 * 1024
+)
+
 type dnsFlight struct {
 	done     chan struct{}
 	response []byte
@@ -56,6 +61,7 @@ func (d *dohResolver) cachedQuery(ctx context.Context, query []byte, resolve fun
 			d.cacheMu.Unlock()
 			return response, nil
 		}
+		d.cacheBytes -= len(entry.response)
 		delete(d.cache, key)
 	}
 	if flight, ok := d.inflight[key]; ok {
@@ -80,18 +86,7 @@ func (d *dohResolver) cachedQuery(ctx context.Context, query []byte, resolve fun
 	if err == nil {
 		flight.response = append([]byte(nil), response...)
 		if ttl, ttlErr := dnsResponseCacheTTL(response); ttlErr == nil && ttl > 0 {
-			if len(d.cache) > 0 && len(d.cache)%256 == 0 {
-				for cachedKey, entry := range d.cache {
-					if !now.Before(entry.expires) {
-						delete(d.cache, cachedKey)
-					}
-				}
-			}
-			d.cache[key] = dnsCacheEntry{
-				response: append([]byte(nil), response...),
-				storedAt: now,
-				expires:  now.Add(time.Duration(ttl) * time.Second),
-			}
+			d.storeCacheEntry(key, response, now, ttl)
 		}
 	} else {
 		flight.err = err
@@ -100,6 +95,48 @@ func (d *dohResolver) cachedQuery(ctx context.Context, query []byte, resolve fun
 	close(flight.done)
 	d.cacheMu.Unlock()
 	return response, err
+}
+
+// storeCacheEntry is called with cacheMu held. It caps both cardinality and
+// retained wire bytes; the byte limit matters because a valid DNS message can
+// be close to 64 KiB even though ordinary answers are much smaller.
+func (d *dohResolver) storeCacheEntry(key string, response []byte, now time.Time, ttl uint32) {
+	if len(response) > maxDNSCacheBytes {
+		return
+	}
+	for cachedKey, entry := range d.cache {
+		if !now.Before(entry.expires) {
+			d.deleteCacheEntry(cachedKey, entry)
+		}
+	}
+	for len(d.cache) >= maxDNSCacheEntries || d.cacheBytes+len(response) > maxDNSCacheBytes {
+		var oldestKey string
+		var oldest dnsCacheEntry
+		for cachedKey, entry := range d.cache {
+			if oldestKey == "" || entry.expires.Before(oldest.expires) {
+				oldestKey, oldest = cachedKey, entry
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		d.deleteCacheEntry(oldestKey, oldest)
+	}
+	entry := dnsCacheEntry{
+		response: append([]byte(nil), response...),
+		storedAt: now,
+		expires:  now.Add(time.Duration(ttl) * time.Second),
+	}
+	d.cache[key] = entry
+	d.cacheBytes += len(entry.response)
+}
+
+func (d *dohResolver) deleteCacheEntry(key string, entry dnsCacheEntry) {
+	delete(d.cache, key)
+	d.cacheBytes -= len(entry.response)
+	if d.cacheBytes < 0 {
+		d.cacheBytes = 0
+	}
 }
 
 func dnsCacheKey(wire []byte) (string, uint16, error) {

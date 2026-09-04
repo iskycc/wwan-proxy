@@ -332,6 +332,9 @@ func (s *Store) SaveServerInput(ctx context.Context, cfg *config.Server) error {
 }
 
 func (s *Store) saveServer(ctx context.Context, cfg *config.Server, trustStoredHashes bool) error {
+	if err := s.preserveUpstreamPassword(ctx, cfg); err != nil {
+		return err
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}

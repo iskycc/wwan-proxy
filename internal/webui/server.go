@@ -40,10 +40,16 @@ type Server struct {
 	limiter             *loginLimiter
 	startupWebListen    string
 	startupDatabasePath string
+	startupVohive       config.VohiveSettings
 	websocketContext    context.Context
 	websocketCancel     context.CancelFunc
 	websocketInterval   time.Duration
 	websocketClients    atomic.Int64
+	overviewCacheMu     sync.Mutex
+	overviewCache       map[string]any
+	overviewCachedAt    time.Time
+	websocketSessionMu  sync.Mutex
+	websocketSessions   map[string]websocketSessionValidation
 	configurationMu     sync.Mutex
 	logLevelSetter      interface{ SetLevel(string) error }
 	updates             updateController
@@ -51,13 +57,20 @@ type Server struct {
 	initialLiveHeap atomic.Uint64
 }
 
+type websocketSessionValidation struct {
+	valid     bool
+	checkedAt time.Time
+}
+
 func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Logger, levelSetters ...interface{ SetLevel(string) error }) *Server {
 	startupWebListen := address
+	var startupVohive config.VohiveSettings
 	if settings, err := st.SystemSettings(context.Background()); err == nil {
 		startupWebListen = settings.WebListen
+		startupVohive = settings.Vohive
 	}
 	websocketContext, websocketCancel := context.WithCancel(context.Background())
-	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path(), websocketContext: websocketContext, websocketCancel: websocketCancel, websocketInterval: time.Second}
+	s := &Server{store: st, manager: mgr, log: logger.With("component", "webui"), started: time.Now(), limiter: newLoginLimiter(), startupWebListen: startupWebListen, startupDatabasePath: st.Path(), startupVohive: startupVohive, websocketContext: websocketContext, websocketCancel: websocketCancel, websocketInterval: time.Second}
 	if len(levelSetters) > 0 {
 		s.logLevelSetter = levelSetters[0]
 	}
@@ -89,7 +102,12 @@ func New(address string, st *store.Store, mgr *manager.Manager, logger *slog.Log
 	mux.HandleFunc("GET /api/stats/summary", s.statsSummary)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
 	staticFS, _ := fs.Sub(assets, "static")
-	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	staticHandler, staticErr := newStaticAssetHandler(staticFS)
+	if staticErr != nil {
+		s.log.Error("Failed to prepare compressed WebUI assets", "error", staticErr)
+		staticHandler = http.FileServer(http.FS(staticFS))
+	}
+	mux.Handle("/", staticHandler)
 	s.http = &http.Server{Addr: address, Handler: securityHeaders(s.authMiddleware(mux)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
 }
@@ -170,6 +188,95 @@ func (s *Server) overviewData(ctx context.Context) (map[string]any, error) {
 	}, nil
 }
 
+// websocketOverviewData shares one immutable database/runtime sample between
+// clients for a push interval, so the three overview queries and runtime
+// memory sampling run once instead of once per connected tab.
+func (s *Server) websocketOverviewData(ctx context.Context, force bool) (map[string]any, error) {
+	s.overviewCacheMu.Lock()
+	defer s.overviewCacheMu.Unlock()
+	cacheLifetime := s.websocketInterval
+	if cacheLifetime <= 0 {
+		cacheLifetime = time.Second
+	}
+	if force || s.overviewCache == nil || time.Since(s.overviewCachedAt) >= cacheLifetime {
+		payload, err := s.overviewData(ctx)
+		if err != nil {
+			return nil, err
+		}
+		s.overviewCache = payload
+		s.overviewCachedAt = time.Now()
+	}
+	return s.overviewForClient(s.overviewCache), nil
+}
+
+func (s *Server) overviewForClient(cached map[string]any) map[string]any {
+	payload := make(map[string]any, len(cached))
+	for key, value := range cached {
+		payload[key] = value
+	}
+	if cachedProcess, ok := cached["process"].(map[string]any); ok {
+		process := make(map[string]any, len(cachedProcess))
+		for key, value := range cachedProcess {
+			process[key] = value
+		}
+		process["websocket_clients"] = s.websocketClients.Load()
+		payload["process"] = process
+	}
+	return payload
+}
+
+// validateWebSocketSession coalesces repeated validation from tabs sharing a
+// login cookie. Session-changing handlers invalidate this tiny cache
+// immediately, so logout and revocation still close sockets on the next push.
+func (s *Server) validateWebSocketSession(ctx context.Context, tokenHash string) (bool, error) {
+	s.websocketSessionMu.Lock()
+	defer s.websocketSessionMu.Unlock()
+	now := time.Now()
+	cacheLifetime := s.websocketInterval
+	if cacheLifetime <= 0 {
+		cacheLifetime = time.Second
+	}
+	if cached, ok := s.websocketSessions[tokenHash]; ok && now.Sub(cached.checkedAt) < cacheLifetime {
+		return cached.valid, nil
+	}
+	_, valid, err := s.store.ValidateSession(ctx, tokenHash, now)
+	if err != nil {
+		return false, err
+	}
+	if s.websocketSessions == nil {
+		s.websocketSessions = make(map[string]websocketSessionValidation)
+	}
+	for cachedToken, cached := range s.websocketSessions {
+		if now.Sub(cached.checkedAt) >= cacheLifetime {
+			delete(s.websocketSessions, cachedToken)
+		}
+	}
+	s.websocketSessions[tokenHash] = websocketSessionValidation{valid: valid, checkedAt: now}
+	return valid, nil
+}
+
+func (s *Server) invalidateWebSocketSession(tokenHash string) {
+	s.websocketSessionMu.Lock()
+	delete(s.websocketSessions, tokenHash)
+	s.websocketSessionMu.Unlock()
+}
+
+func (s *Server) invalidateWebSocketSessionsExcept(keepTokenHash string) {
+	s.websocketSessionMu.Lock()
+	for tokenHash := range s.websocketSessions {
+		if tokenHash != keepTokenHash {
+			delete(s.websocketSessions, tokenHash)
+		}
+	}
+	s.websocketSessionMu.Unlock()
+}
+
+func (s *Server) invalidateAllWebSocketSessions() {
+	s.websocketSessionMu.Lock()
+	clear(s.websocketSessions)
+	s.websocketSessionMu.Unlock()
+}
+
 var (
 	errWebSocketSessionExpired  = errors.New("websocket session expired")
 	errUnsupportedSocketMessage = errors.New("unsupported websocket message")
@@ -219,15 +326,15 @@ func (s *Server) overviewWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	send := func() error {
-		_, valid, validateErr := s.store.ValidateSession(ctx, tokenHash, time.Now())
+	send := func(force bool) error {
+		valid, validateErr := s.validateWebSocketSession(ctx, tokenHash)
 		if validateErr != nil {
 			return fmt.Errorf("validate WebSocket session: %w", validateErr)
 		}
 		if !valid {
 			return errWebSocketSessionExpired
 		}
-		payload, dataErr := s.overviewData(ctx)
+		payload, dataErr := s.websocketOverviewData(ctx, force)
 		if dataErr != nil {
 			return dataErr
 		}
@@ -248,7 +355,7 @@ func (s *Server) overviewWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	}
-	if handleSendError(send()) {
+	if handleSendError(send(false)) {
 		return
 	}
 
@@ -265,11 +372,11 @@ func (s *Server) overviewWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		case <-refresh:
-			if handleSendError(send()) {
+			if handleSendError(send(true)) {
 				return
 			}
 		case <-ticker.C:
-			if handleSendError(send()) {
+			if handleSendError(send(false)) {
 				return
 			}
 		}

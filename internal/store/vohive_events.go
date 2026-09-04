@@ -55,6 +55,8 @@ func (s *Store) SaveVohiveEvent(ctx context.Context, event VohiveEvent) (int64, 
 func (s *Store) ListVohiveEvents(ctx context.Context, opts ListVohiveEventsOptions) ([]VohiveEvent, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 100
+	} else if opts.Limit > 1000 {
+		opts.Limit = 1000
 	}
 	var clauses []string
 	var args []any

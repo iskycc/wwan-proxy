@@ -9,6 +9,24 @@ import (
 	"wwan-proxy/internal/proxyauth"
 )
 
+// preserveUpstreamPassword implements the API/UI contract that an empty
+// upstream password on update means "leave the existing secret unchanged".
+// New configurations still pass the empty value to validation and are
+// rejected when username/password authentication is enabled.
+func (s *Store) preserveUpstreamPassword(ctx context.Context, cfg *config.Server) error {
+	if cfg.ID == 0 || cfg.Upstream.Password != "" {
+		return nil
+	}
+	old, err := s.GetServer(ctx, cfg.ID)
+	if err != nil {
+		return err
+	}
+	if old.Upstream.Password != "" {
+		cfg.Upstream.Password = old.Upstream.Password
+	}
+	return nil
+}
+
 func (s *Store) prepareProxyCredentials(ctx context.Context, cfg *config.Server, trustStoredHashes bool) error {
 	unchanged := make(map[string]struct{}, len(cfg.Auth.PasswordUnchanged))
 	for _, user := range cfg.Auth.PasswordUnchanged {

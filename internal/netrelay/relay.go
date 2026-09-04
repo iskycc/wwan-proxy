@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const bufferSize = 128 * 1024
+// Two buffers are held for the lifetime of every full-duplex tunnel. Keeping
+// them at io.Copy's conventional size avoids reserving 256 KiB per connection
+// while still amortizing socket reads and writes effectively.
+const bufferSize = 32 * 1024
 
 var bufferPool = sync.Pool{New: func() any {
 	buffer := make([]byte, bufferSize)
@@ -33,7 +36,7 @@ func (w *activityWriter) Write(p []byte) (int, error) {
 }
 
 // Bidirectional copies client-to-upstream and upstream-to-client concurrently.
-// It uses pooled 128 KiB buffers and one shared idle watchdog. This avoids a
+// It uses pooled 32 KiB buffers and one shared idle watchdog. This avoids a
 // SetDeadline syscall on every Read and Write, which is especially expensive
 // when a TCP stream is passing through another SOCKS5 hop.
 func Bidirectional(client, upstream net.Conn, idle time.Duration, upload, download *atomic.Uint64) error {
