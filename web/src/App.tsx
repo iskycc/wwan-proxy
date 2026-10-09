@@ -18,7 +18,6 @@ import {
   Space,
   Spin,
   Typography,
-  Tooltip,
   theme,
 } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
@@ -272,23 +271,40 @@ function Dashboard() {
               />
             )}
             <ThemeSelect />
-            <Dropdown
-              menu={{
-                items: [{ key: 'logout', label: '退出登录', icon: <LogoutOutlined /> }],
-                onClick: () => {
-                  void session.logout().catch((error) => message.error(errorMessage(error)));
-                },
-              }}
-            >
-              <Button type="text" className="account-button" aria-label="账户菜单">
-                <Avatar size="small" style={{ background: '#1677ff' }}>
-                  {Array.from(username)[0]?.toUpperCase()}
-                </Avatar>
-                <Tooltip title={username}>
+            <div className="account-menu">
+              <Dropdown
+                trigger={['click']}
+                placement="bottomRight"
+                getPopupContainer={(trigger) => trigger.parentElement!}
+                menu={{
+                  items: [
+                    {
+                      key: 'username',
+                      label: <span className="break-text">{username}</span>,
+                      disabled: true,
+                    },
+                    { type: 'divider' },
+                    { key: 'logout', label: '退出登录', icon: <LogoutOutlined /> },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'logout')
+                      void session.logout().catch((error) => message.error(errorMessage(error)));
+                  },
+                }}
+              >
+                <Button
+                  type="text"
+                  className="account-button"
+                  aria-label="账户菜单"
+                  title={username}
+                >
+                  <Avatar size="small" style={{ background: '#1677ff' }}>
+                    {Array.from(username)[0]?.toUpperCase()}
+                  </Avatar>
                   <span className="account-name">{username}</span>
-                </Tooltip>
-              </Button>
-            </Dropdown>
+                </Button>
+              </Dropdown>
+            </div>
           </Space>
         </Layout.Header>
         <Layout.Content className="app-content">

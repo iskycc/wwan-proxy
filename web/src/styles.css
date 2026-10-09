@@ -178,6 +178,12 @@ textarea {
 .header-actions {
   flex-shrink: 0;
 }
+.account-menu {
+  position: relative;
+}
+.account-menu .ant-dropdown {
+  max-width: min(280px, calc(100vw - 32px));
+}
 .account-button {
   display: inline-flex;
   align-items: center;
