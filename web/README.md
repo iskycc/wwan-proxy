@@ -37,6 +37,17 @@ npm run test:integration
 
 账户菜单通过点击或键盘打开，完整用户名在菜单内显示。指标卡使用原生 `title` 提示完整数值，悬停时不创建额外浮层。`tests/hover.spec.ts` 在可见滚动条、浅色和深色主题下，验证持续实时更新期间的悬停布局稳定性，以及账户菜单的打开、关闭和退出登录。
 
+`tests/select.spec.ts` 使用实际坐标点击下拉框，检查菜单出现在视口内、实时更新期间保持打开，以及选择后筛选请求和表单联动正常。默认测试覆盖窄屏、桌面和系统减少动画偏好；跨浏览器配置还覆盖 Firefox、WebKit 和模拟手机触摸：
+
+```bash
+npx playwright install chromium firefox webkit
+npx playwright test --config playwright.select.config.ts
+```
+
+控制台启动时读取 `prefers-reduced-motion`，通过 Ant Design 的 `theme.token.motion` 关闭组件动画。不要用全局 `animation-duration` 或 `transition-duration` 覆盖组件动画：极短的过渡会干扰浮层准备与定位，使已经打开的菜单停留在屏幕外。系统动画偏好改变后重新加载页面生效，避免动态替换动画 Provider 丢失编辑草稿。
+
+浏览器异常排查可将 `../scripts/debug-webui-select.js` 的全部内容粘贴到故障页面的 Console 中执行，再点击主题下拉框。两秒后会打印 `WWAN_SELECT_DIAGNOSTIC`，包含鼠标事件、展开状态、菜单坐标、样式和动画状态；脚本只读取页面状态，不读取表单值或请求后端。`tests/select-diagnostics.spec.ts` 验证正常、屏幕外和透明菜单的诊断结果。
+
 查看本次布局审查的页面截图（输出到临时目录，不纳入生产包）：
 
 ```bash

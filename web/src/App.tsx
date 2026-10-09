@@ -412,6 +412,9 @@ export default function App() {
   const [systemDark, setSystemDark] = useState(
     () => matchMedia('(prefers-color-scheme: dark)').matches,
   );
+  // Apply the animation preference on load; changing Ant's motion provider
+  // while editing can remount its children and discard a form draft.
+  const [reducedMotion] = useState(() => matchMedia('(prefers-reduced-motion: reduce)').matches);
   const dark = preference === 'dark' || (preference === 'system' && systemDark);
   useEffect(() => {
     const media = matchMedia('(prefers-color-scheme: dark)'),
@@ -439,6 +442,7 @@ export default function App() {
         algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
         token: {
           colorPrimary: '#1677ff',
+          motion: !reducedMotion,
           borderRadius: 10,
           fontFamily:
             '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
