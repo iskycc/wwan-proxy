@@ -6,13 +6,67 @@ const script = readFileSync(
   'utf8',
 );
 type Report = {
+  environment: {
+    viewport: { width: number; height: number };
+    media: Record<string, boolean>;
+  };
   events: { type: string; trusted: boolean }[];
   snapshots: {
+    viewport: { width: number; height: number };
+    media: Record<string, boolean>;
     expanded: string;
     popups: { inViewport: boolean; computed: { opacity: string } }[];
   }[];
   errors: unknown[];
 };
+
+test('诊断等待真实打开操作，单纯聚焦不会提前完成采集', async ({ page, backend }) => {
+  await page.goto('/');
+  const input = page.getByRole('combobox', { name: '界面主题', exact: true });
+  await expect(input).toBeVisible();
+  const reports: Report[] = [];
+  page.on('console', (message) => {
+    if (message.text().startsWith('WWAN_SELECT_DIAGNOSTIC\n')) {
+      reports.push(JSON.parse(message.text().split('\n').slice(1).join('\n')) as Report);
+    }
+  });
+  await page.evaluate(script);
+  await input.focus();
+  await page.waitForTimeout(2200);
+  expect(reports).toEqual([]);
+  await input.press('ArrowDown');
+  await expect.poll(() => reports.length).toBe(1);
+  expect(reports[0].events[0]).toMatchObject({ type: 'keydown', trusted: true });
+  expect(reports[0].snapshots.at(-1)).toMatchObject({ expanded: 'true' });
+  expect(reports[0].snapshots.at(-1)!.popups[0].inViewport).toBe(true);
+  expect(backend.requests.every(({ method }) => method === 'GET')).toBe(true);
+});
+
+test('诊断使用交互时的视口和动画偏好，记录采集中的环境变化', async ({ page, backend }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.goto('/');
+  const input = page.getByRole('combobox', { name: '界面主题', exact: true });
+  await expect(input).toBeVisible();
+  await page.evaluate(script);
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const output = page.waitForEvent('console', {
+    predicate: (message) => message.text().startsWith('WWAN_SELECT_DIAGNOSTIC\n'),
+  });
+  await input.press('ArrowDown');
+  // Change preferences while the menu is open, before the remaining snapshots.
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const text = (await output).text();
+  const report = JSON.parse(text.slice(text.indexOf('\n') + 1)) as Report;
+  expect(report.environment.viewport).toMatchObject({ width: 1100, height: 900 });
+  expect(report.environment.media['prefers-reduced-motion: reduce']).toBe(false);
+  expect(report.snapshots[0].viewport).toMatchObject({ width: 1100, height: 900 });
+  expect(report.snapshots[0].media['prefers-reduced-motion: reduce']).toBe(true);
+  expect(report.snapshots.at(-1)!.media['prefers-reduced-motion: reduce']).toBe(false);
+  expect(report.snapshots.at(-1)!.popups[0].inViewport).toBe(true);
+  expect(backend.requests.every(({ method }) => method === 'GET')).toBe(true);
+});
 
 for (const [name, style] of [
   ['正常菜单', ''],

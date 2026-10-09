@@ -199,7 +199,7 @@ async function populate(page: Page, backend: Backend) {
 async function capture(page: Page, name: string, fullPage = true) {
   if (!process.env.WWAN_UI_AUDIT) return;
   await page.screenshot({
-    path: path.join('/tmp/wwan-ui-audit', name + '.png'),
+    path: path.join(process.env.WWAN_UI_AUDIT_DIR || '/tmp/wwan-ui-audit', name + '.png'),
     fullPage,
     animations: 'disabled',
   });
@@ -281,6 +281,14 @@ for (const viewport of [
           ).toBeVisible();
         if (key === 'performance') await expect(page.locator('canvas').first()).toBeVisible();
         if (key === 'statistics') await expect(page.locator('canvas').first()).toBeVisible();
+        if (key === 'logs' && viewport.width >= 1440) {
+          const message = page.locator('.record-message').first();
+          await expect(message).toBeInViewport({ ratio: 0.99 });
+          expect(
+            (await message.boundingBox())!.width,
+            '长实例名不能挤占日志消息列',
+          ).toBeGreaterThan(200);
+        }
         await capture(page, viewport.width + (viewport.dark ? '-dark' : '') + '/' + key);
         expect.soft(await geometry(page), label + ' · ' + viewport.width).toEqual([]);
       }

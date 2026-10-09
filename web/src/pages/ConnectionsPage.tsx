@@ -60,9 +60,13 @@ export default function ConnectionsPage({
     </Space>
   );
   return (
-    <Card title="代理实例">
+    <Card title="代理实例" className="records-card">
+      <Typography.Paragraph type="secondary" className="section-intro">
+        配置保存后自动热应用。每个实例使用独立的出口网口和访问策略。
+      </Typography.Paragraph>
       <div className="table-toolbar">
         <Input
+          aria-label="搜索代理实例"
           prefix={<SearchOutlined />}
           placeholder="搜索名称、接口或地址"
           allowClear
@@ -70,10 +74,11 @@ export default function ConnectionsPage({
           onChange={(event) => setQuery(event.target.value)}
           className="table-search"
         />
+        <Typography.Text type="secondary" className="table-count">
+          {query ? '匹配 ' + rows.length + ' / ' : '共 '}
+          {overview.servers.length} 个实例
+        </Typography.Text>
       </div>
-      <Typography.Paragraph type="secondary">
-        配置保存后自动热应用。每个实例使用独立的出口网口和访问策略。
-      </Typography.Paragraph>
       {compact ? (
         <List
           className="mobile-records"
@@ -96,11 +101,11 @@ export default function ConnectionsPage({
                     {server.udp.enabled && <Tag>UDP</Tag>}
                   </Space>
                   <div className="record-addresses">
-                    <Typography.Text className="break-text">
+                    <Typography.Text className="endpoint-text">
                       SOCKS5：{server.listen}
                     </Typography.Text>
                     {server.http_proxy.enabled && (
-                      <Typography.Text className="break-text">
+                      <Typography.Text className="endpoint-text">
                         HTTP：{server.http_proxy.listen}
                       </Typography.Text>
                     )}
@@ -113,9 +118,10 @@ export default function ConnectionsPage({
         />
       ) : (
         <Table<ServerConfig>
+          tableLayout="fixed"
           rowKey="id"
           dataSource={rows}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1088 }}
           pagination={{
             defaultPageSize: 10,
             showSizeChanger: true,
@@ -127,26 +133,29 @@ export default function ConnectionsPage({
               dataIndex: 'name',
               fixed: 'left',
               width: 170,
-              ellipsis: true,
               render: (value) => (
-                <Typography.Text strong ellipsis={{ tooltip: value }}>
+                <Typography.Paragraph
+                  className="connection-name"
+                  strong
+                  ellipsis={{ rows: 2, tooltip: value }}
+                >
                   {value}
-                </Typography.Text>
+                </Typography.Paragraph>
               ),
             },
             {
               title: '监听地址',
-              width: 220,
+              width: 275,
               render: (_, server) => (
-                <Space orientation="vertical" size={2}>
-                  <span className="break-text">
+                <Space orientation="vertical" size={6} className="full-width">
+                  <span className="listener-address">
                     <Tag>SOCKS5</Tag>
-                    {server.listen}
+                    <span className="endpoint-text">{server.listen}</span>
                   </span>
                   {server.http_proxy.enabled && (
-                    <span className="break-text">
+                    <span className="listener-address">
                       <Tag>HTTP</Tag>
-                      {server.http_proxy.listen}
+                      <span className="endpoint-text">{server.http_proxy.listen}</span>
                     </span>
                   )}
                 </Space>
@@ -154,11 +163,13 @@ export default function ConnectionsPage({
             },
             {
               title: '出口网口',
+              width: 128,
               dataIndex: 'interface',
               render: (value) => <Tag color="blue">{value}</Tag>,
             },
             {
               title: 'DNS',
+              width: 116,
               render: (_, server) => (
                 <Space wrap size={4}>
                   <Tag>{server.dns.doh ? 'DoH' : server.dns.servers?.length ? 'DNS' : '系统'}</Tag>
@@ -168,6 +179,7 @@ export default function ConnectionsPage({
             },
             {
               title: 'UDP',
+              width: 125,
               render: (_, server) =>
                 !server.udp.enabled ? (
                   <Typography.Text type="secondary">关闭</Typography.Text>
@@ -181,6 +193,7 @@ export default function ConnectionsPage({
             },
             {
               title: '状态',
+              width: 104,
               render: (_, server) => {
                 const status = serverHealth(server, overview);
                 return <Badge status={status.status} text={status.text} />;

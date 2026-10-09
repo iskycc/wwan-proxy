@@ -39,7 +39,7 @@ export default function PerformancePage({
           unit="rate"
         />
       </Card>
-      <Card title="进程与协议指标">
+      <Card title="进程与协议指标" className="process-card">
         <Descriptions
           bordered
           column={{ xs: 1, sm: 1, md: 2, xl: 3 }}
@@ -51,13 +51,30 @@ export default function PerformancePage({
             },
             { key: 'alloc', label: '当前分配堆', children: bytes(process.heap_bytes) },
             { key: 'sys', label: 'Go 系统内存', children: bytes(process.sys_bytes) },
-            { key: 'goroutines', label: 'Goroutine', children: process.goroutines },
-            { key: 'gc', label: 'GC 次数', children: process.gc_cycles },
+            {
+              key: 'goroutines',
+              label: 'Goroutine',
+              children: process.goroutines.toLocaleString('zh-CN'),
+            },
+            { key: 'gc', label: 'GC 次数', children: process.gc_cycles.toLocaleString('zh-CN') },
             { key: 'ws', label: 'WebSocket 客户端', children: process.websocket_clients },
-            { key: 'active', label: '活跃会话', children: totals.active },
-            { key: 'errors', label: '连接 / 请求错误', children: totals.errors },
-            { key: 'packets', label: 'UDP 数据包', children: totals.udpPackets },
-            { key: 'drops', label: 'UDP 丢弃 / 错误', children: totals.udpErrors },
+            { key: 'active', label: '活跃会话', children: totals.active.toLocaleString('zh-CN') },
+            {
+              key: 'errors',
+              label: '连接 / 请求错误',
+              children: totals.errors.toLocaleString('zh-CN'),
+            },
+            {
+              key: 'packets',
+              label: 'UDP 数据包',
+              children: totals.udpPackets.toLocaleString('zh-CN'),
+            },
+            {
+              key: 'drops',
+              label: 'UDP 丢弃 / 错误',
+              children: totals.udpErrors.toLocaleString('zh-CN'),
+              span: 'filled',
+            },
           ]}
         />
       </Card>

@@ -129,7 +129,7 @@ textarea {
 .sidebar-brand small {
   display: block;
   font-size: 11px;
-  color: #8c8c8c;
+  color: var(--ant-color-text-secondary, #667085);
   margin-top: 3px;
 }
 .app-sider .ant-menu {
@@ -148,7 +148,7 @@ textarea {
 .sider-status small {
   display: block;
   margin-top: 8px;
-  color: #8c8c8c;
+  color: var(--ant-color-text-secondary, #667085);
   font-size: 11px;
 }
 .main-layout {
@@ -202,6 +202,10 @@ textarea {
   max-width: 2300px;
   margin: 0 auto;
 }
+.app-content > .ant-space .ant-card,
+.app-content > .ant-card {
+  box-shadow: 0 2px 8px #102a4304;
+}
 .page-heading {
   display: flex;
   align-items: center;
@@ -223,6 +227,13 @@ textarea {
   text-align: center;
   font-size: 12px;
 }
+.app-footer .ant-typography {
+  font-size: 12px;
+}
+.section-intro.ant-typography {
+  margin-bottom: 18px;
+  line-height: 1.7;
+}
 .overview-banner {
   background-image: linear-gradient(110deg, #1677ff08, transparent 70%);
 }
@@ -240,13 +251,12 @@ textarea {
   color: #1677ff;
   font-weight: 700;
   line-height: 1.2;
-}
-.health-count {
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .health-summary small {
   font-size: 26px;
-  color: #8c8c8c;
+  color: var(--ant-color-text-secondary, #667085);
   font-weight: 400;
 }
 .metric-card {
@@ -255,9 +265,26 @@ textarea {
 .metric-card .ant-statistic-content {
   font-size: clamp(21px, 1.8vw, 30px);
   white-space: nowrap;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
 }
 .metric-card .ant-statistic-title {
   font-size: 13px;
+  margin-bottom: 8px;
+}
+.metric-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.metric-icon {
+  color: var(--ant-color-primary, #1677ff);
+}
+.metric-unit {
+  font-size: 0.62em;
+  font-weight: 500;
+  color: var(--ant-color-text-secondary, #667085);
 }
 .metric-card .ant-typography {
   display: inline-block;
@@ -324,6 +351,10 @@ textarea {
 }
 .filter-bar {
   margin-bottom: 20px;
+  padding: 14px;
+  background: var(--ant-color-fill-alter, #fafafa);
+  border: 1px solid var(--ant-color-border-secondary, #e9edf3);
+  border-radius: 8px;
 }
 .filter-bar,
 .statistics-toolbar,
@@ -336,6 +367,46 @@ textarea {
 }
 .table-toolbar {
   margin-bottom: 20px;
+}
+.table-count,
+.filter-note {
+  margin-left: auto;
+  font-size: 12px;
+}
+.table-count {
+  white-space: nowrap;
+}
+.listener-address {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+.listener-address .ant-tag {
+  margin: 0;
+  width: max-content;
+}
+.connection-name.ant-typography {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.endpoint-text {
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.record-time {
+  color: var(--ant-color-text-secondary, #667085);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.record-component {
+  font-size: 12px;
+}
+.statistics-toolbar > .ant-btn {
+  margin-left: auto;
 }
 .filter-select {
   width: 160px;
@@ -412,6 +483,14 @@ textarea {
 .editor-footer > span {
   flex: 1;
 }
+.server-editor .ant-modal-header {
+  margin-bottom: 16px;
+}
+.server-editor .ant-modal-footer {
+  margin-top: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--ant-color-border-secondary, #e9edf3);
+}
 .server-editor .ant-modal-title {
   padding-inline-end: 32px;
 }
@@ -420,6 +499,7 @@ textarea {
 }
 .server-editor .ant-modal-body {
   scrollbar-gutter: stable;
+  padding-bottom: 16px;
 }
 .server-editor .ant-tabs-content {
   padding: 4px 4px 8px 0;
@@ -464,14 +544,44 @@ textarea {
   padding-top: 22px;
   border-top: 1px solid var(--ant-color-border-secondary, #e9edf3);
 }
+.settings-divider h5.ant-typography {
+  margin: 0 0 8px;
+}
+.update-card .ant-descriptions-item-label {
+  white-space: nowrap;
+}
+.version-text {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--ant-color-fill-quaternary, #f5f7fa);
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.update-agent-status.ant-typography {
+  margin: 14px 0;
+  font-size: 12px;
+}
+.process-card .ant-descriptions-item-content {
+  font-variant-numeric: tabular-nums;
+}
 .loading-panel {
   padding: 70px 24px;
   text-align: center;
 }
 .session-icon {
-  font-size: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--ant-color-primary-bg, #e6f4ff);
+  font-size: 20px;
   color: #1677ff;
-  margin-top: 4px;
 }
 .session-description {
   display: flex;
@@ -645,6 +755,7 @@ textarea {
     padding: 16px;
   }
   .table-search,
+  .filter-select,
   .filter-search,
   .statistics-select {
     width: 100%;
@@ -664,6 +775,25 @@ textarea {
   .filter-bar,
   .statistics-toolbar {
     max-width: 100%;
+  }
+  .filter-bar {
+    padding: 12px;
+  }
+  .filter-note,
+  .table-count {
+    margin-left: 0;
+  }
+  .statistics-toolbar > .ant-btn,
+  .statistics-toolbar > .ant-segmented {
+    width: 100%;
+    margin-left: 0;
+  }
+  .statistics-toolbar .ant-segmented-group {
+    display: flex;
+  }
+  .statistics-toolbar .ant-segmented-item {
+    flex: 1;
+    text-align: center;
   }
   .editor-footer {
     flex-wrap: wrap;
@@ -702,7 +832,7 @@ textarea {
     width: 100%;
   }
   .sessions-card .ant-list .ant-list-item-action {
-    margin-left: 42px;
+    margin-left: 52px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

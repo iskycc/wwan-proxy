@@ -1,10 +1,12 @@
 import { test, expect } from './fixtures';
 import path from 'node:path';
+import { seedDemoData } from './demo';
 
 test('生成 Ant Design 页面预览', async ({ page, backend }) => {
-  test.setTimeout(60000);
+  test.setTimeout(120000);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  const docs = path.resolve(import.meta.dirname, '../../docs');
+  const docs =
+    process.env.WWAN_UI_SCREENSHOT_DIR || path.resolve(import.meta.dirname, '../../docs');
   backend.auth = { initialized: false, authenticated: false };
   await page.goto('/');
   await expect(page.getByRole('button', { name: '初始化并进入控制台' })).toBeVisible();
@@ -13,82 +15,9 @@ test('生成 Ant Design 页面预览', async ({ page, backend }) => {
     fullPage: true,
     animations: 'disabled',
   });
-  backend.auth = { initialized: true, authenticated: true, username: 'administrator' };
-  const server = backend.overview.servers[0];
-  server.enabled = true;
-  backend.overview.servers.push({
-    ...structuredClone(server),
-    id: 2,
-    name: '联通网络 02',
-    interface: 'wwan1',
-    listen: '0.0.0.0:1081',
-    vohive_device_id: 'Y3',
-  });
-  server.interface = 'wwan0';
-  backend.overview.instances = backend.overview.servers.map((server) => ({
-    id: server.id!,
-    name: server.name,
-    enabled: true,
-    running: true,
-    http_running: false,
-    listen: server.listen,
-    interface: server.interface,
-    started_at: new Date(Date.now() - 3600000).toISOString(),
-    metrics: {
-      active_connections: 12,
-      active_udp: 2,
-      total_connections: 12560,
-      tcp_upload_bytes: 655360000,
-      tcp_download_bytes: 2147483648,
-      udp_upload_bytes: 20971520,
-      udp_download_bytes: 52428800,
-    },
-    http_metrics: {},
-  }));
-  backend.overview.heartbeats = Object.fromEntries(
-    backend.overview.servers.map((server, index) => [
-      server.id,
-      {
-        checked_at: new Date().toISOString(),
-        healthy: true,
-        latency_ms: 56 + index * 12,
-        status_code: 200,
-        public_ip: '203.0.113.' + (21 + index),
-        colo: 'HKG',
-        error: '',
-        trace: '',
-      },
-    ]),
-  );
-  const at = Date.parse(backend.overview.sampled_at);
-  await page.addInitScript(
-    (history) =>
-      localStorage.setItem('wwan-control.traffic.administrator', JSON.stringify(history)),
-    {
-      service: backend.overview.service_instance_id,
-      at,
-      baselines: Object.fromEntries(
-        backend.overview.instances.map((instance) => [
-          instance.id,
-          {
-            generation: instance.started_at,
-            upload:
-              (instance.metrics!.tcp_upload_bytes || 0) + (instance.metrics!.udp_upload_bytes || 0),
-            download:
-              (instance.metrics!.tcp_download_bytes || 0) +
-              (instance.metrics!.udp_download_bytes || 0),
-          },
-        ]),
-      ),
-      points: Array.from({ length: 60 }, (_, index) => ({
-        at: at - (60 - index) * 4000,
-        upload: 1024 * 1024 * (3 + Math.sin(index / 3)),
-        download: 1024 * 1024 * (8 + Math.cos(index / 4)),
-      })),
-    },
-  );
+  await seedDemoData(page, backend);
   await page.reload();
-  await expect(page.getByText('所有出口运行正常')).toBeVisible();
+  await expect(page.getByText('部分出口需要关注')).toBeVisible();
   await page.screenshot({
     path: path.join(docs, 'webui-overview.png'),
     fullPage: true,
@@ -123,6 +52,7 @@ test('生成 Ant Design 页面预览', async ({ page, backend }) => {
     .click();
   await page.getByRole('menuitem', { name: '系统设置' }).click();
   await expect(page.getByLabel('Vohive 用户名')).toHaveValue('admin');
+  await page.mouse.move(1, 1);
   await page.screenshot({
     path: path.join(docs, 'webui-settings.png'),
     fullPage: true,
@@ -170,4 +100,35 @@ test('生成 Ant Design 页面预览', async ({ page, backend }) => {
     fullPage: true,
     animations: 'disabled',
   });
+  if (process.env.WWAN_UI_AUDIT) {
+    const audit = process.env.WWAN_UI_AUDIT_DIR || '/tmp/wwan-ui-audit';
+    for (const width of [390, 1440]) {
+      for (const dark of [false, true]) {
+        await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+        await page.getByRole('combobox', { name: '界面主题' }).click();
+        await page
+          .locator('.ant-select-item-option-content')
+          .getByText(dark ? '深色主题' : '浅色主题', { exact: true })
+          .click();
+        for (const [key, label, ready] of [
+          ['overview', '网络总览', '.egress-card'],
+          ['configuration', '连接配置', width < 768 ? '.mobile-record' : '.ant-table-row'],
+          ['performance', '实时性能', 'canvas'],
+          ['logs', '运行日志', width < 768 ? '.mobile-record' : '.ant-table-row'],
+          ['events', 'Vohive 事件', width < 768 ? '.mobile-record' : '.ant-table-row'],
+          ['statistics', '历史统计', 'canvas'],
+          ['settings', '系统设置', '.sessions-card .ant-list-item'],
+        ]) {
+          await page.goto('/#' + key);
+          await expect(page.getByRole('heading', { name: label, exact: true })).toBeVisible();
+          await expect(page.locator(ready).first()).toBeVisible();
+          await page.screenshot({
+            path: path.join(audit, 'demo-' + width + (dark ? '-dark' : ''), key + '.png'),
+            fullPage: true,
+            animations: 'disabled',
+          });
+        }
+      }
+    }
+  }
 });

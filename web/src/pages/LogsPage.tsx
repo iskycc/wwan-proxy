@@ -28,6 +28,7 @@ export default function LogsPage() {
   );
   return (
     <Card
+      className="records-card"
       title="运行日志"
       extra={
         <Button
@@ -58,7 +59,9 @@ export default function LogsPage() {
           className="filter-search"
           aria-label="搜索运行日志"
         />
-        <Typography.Text type="secondary">显示最近 300 条记录</Typography.Text>
+        <Typography.Text type="secondary" className="filter-note">
+          显示最近 300 条记录
+        </Typography.Text>
       </div>
       {result.error && <Alert type="error" showIcon title={result.error} className="form-alert" />}
       {compact ? (
@@ -76,7 +79,9 @@ export default function LogsPage() {
                   >
                     {row.level}
                   </Tag>
-                  <Typography.Text type="secondary">{time(row.timestamp)}</Typography.Text>
+                  <Typography.Text type="secondary" className="record-time">
+                    {time(row.timestamp)}
+                  </Typography.Text>
                 </Space>
                 <Typography.Text strong ellipsis={{ tooltip: row.server_name || row.component }}>
                   {row.server_name || row.component || '系统'}
@@ -101,18 +106,28 @@ export default function LogsPage() {
         />
       ) : (
         <Table<LogEntry>
+          tableLayout="fixed"
           rowKey="id"
           loading={result.loading}
           dataSource={result.data || []}
           scroll={{ x: 800 }}
-          pagination={{ defaultPageSize: 20, showSizeChanger: true }}
+          pagination={{
+            defaultPageSize: 20,
+            showSizeChanger: true,
+            showTotal: (total) => '共 ' + total + ' 条记录',
+          }}
           expandable={{
             expandedRowRender: (row) => (
               <DetailView value={{ message: row.message, ...row.details }} />
             ),
           }}
           columns={[
-            { title: '时间', dataIndex: 'timestamp', width: 185, render: time },
+            {
+              title: '时间',
+              dataIndex: 'timestamp',
+              width: 180,
+              render: (value) => <span className="record-time">{time(value)}</span>,
+            },
             {
               title: '级别',
               dataIndex: 'level',
@@ -141,7 +156,9 @@ export default function LogsPage() {
                   <Typography.Text ellipsis={{ tooltip: row.server_name }}>
                     {row.server_name || '系统'}
                   </Typography.Text>
-                  <Typography.Text type="secondary">{row.component}</Typography.Text>
+                  <Typography.Text type="secondary" className="break-text record-component">
+                    {row.component}
+                  </Typography.Text>
                 </Space>
               ),
             },

@@ -14,6 +14,7 @@ export default function TrafficChart({
   height?: number;
 }) {
   const { token } = theme.useToken();
+  const dark = token.colorBgContainer === '#141414';
   const compact = !Grid.useBreakpoint().md;
   const data = points
     .flatMap((point) =>
@@ -53,13 +54,17 @@ export default function TrafficChart({
         scale={{
           x: { type: 'time' },
           y: { domainMin: 0 },
-          color: { range: [token.colorPrimary, '#13c2c2', '#faad14'] },
+          color: {
+            range: [dark ? '#69b1ff' : token.colorPrimary, dark ? '#5cdbd3' : '#13c2c2', '#faad14'],
+          },
         }}
         axis={{
           x: {
             tickCount: compact ? 3 : 5,
             labelAutoHide: true,
             labelAutoRotate: false,
+            labelFill: token.colorTextSecondary,
+            labelOpacity: 1,
             labelFormatter: (value: number) =>
               span >= 2 * 86400000
                 ? new Date(Number(value)).toLocaleDateString('zh-CN', {
@@ -73,14 +78,20 @@ export default function TrafficChart({
                   }),
             title: false,
           },
-          y: { labelFormatter: (value: number) => format(Number(value)), title: false },
+          y: {
+            labelFormatter: (value: number) => format(Number(value)),
+            labelFill: token.colorTextSecondary,
+            labelOpacity: 1,
+            title: false,
+          },
         }}
         tooltip={{
           title: (datum: { at: number }) => new Date(datum.at).toLocaleString('zh-CN'),
           items: [{ channel: 'y', valueFormatter: (value: number) => format(value) }],
         }}
         legend={{ color: { position: 'top', itemLabelFill: token.colorText } }}
-        theme={token.colorBgContainer === '#141414' ? 'dark' : 'light'}
+        style={{ lineWidth: 2 }}
+        theme={dark ? 'dark' : 'light'}
         animate={false}
       />
     </div>

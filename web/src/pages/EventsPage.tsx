@@ -44,6 +44,7 @@ export default function EventsPage() {
   };
   return (
     <Card
+      className="records-card"
       title="Vohive 设备事件"
       extra={
         <Button
@@ -56,7 +57,7 @@ export default function EventsPage() {
         </Button>
       }
     >
-      <Typography.Paragraph type="secondary">
+      <Typography.Paragraph type="secondary" className="section-intro">
         查看设备健康变化、网络重启及自动恢复结果。展开事件可查看完整诊断。
       </Typography.Paragraph>
       <div className="filter-bar">
@@ -88,7 +89,9 @@ export default function EventsPage() {
           renderItem={(row) => (
             <List.Item>
               <div className="mobile-record">
-                <Typography.Text type="secondary">{time(row.created_at)}</Typography.Text>
+                <Typography.Text type="secondary" className="record-time">
+                  {time(row.created_at)}
+                </Typography.Text>
                 <Space wrap size={[4, 4]}>
                   <Tag>{row.device_id || '系统'}</Tag>
                   <Tag color={eventColors[row.type]}>{eventLabels[row.type] || row.type}</Tag>
@@ -111,18 +114,28 @@ export default function EventsPage() {
         />
       ) : (
         <Table<VohiveEvent>
+          tableLayout="fixed"
           rowKey="id"
           loading={result.loading}
           dataSource={result.data || []}
           scroll={{ x: 800 }}
-          pagination={{ defaultPageSize: 20, showSizeChanger: true }}
+          pagination={{
+            defaultPageSize: 20,
+            showSizeChanger: true,
+            showTotal: (total) => '共 ' + total + ' 条事件',
+          }}
           expandable={{
             expandedRowRender: (row) => (
               <DetailView value={{ message: row.message, ...row.details }} />
             ),
           }}
           columns={[
-            { title: '时间', dataIndex: 'created_at', width: 185, render: time },
+            {
+              title: '时间',
+              dataIndex: 'created_at',
+              width: 180,
+              render: (value) => <span className="record-time">{time(value)}</span>,
+            },
             {
               title: '设备',
               dataIndex: 'device_id',

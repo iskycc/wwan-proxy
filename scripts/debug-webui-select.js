@@ -13,6 +13,21 @@
   let captured = false;
   let stopped = false;
   const elapsed = () => Math.round(performance.now() - started);
+  const viewState = () => ({
+    viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+    visualViewport: window.visualViewport && {
+      scale: visualViewport.scale,
+      width: visualViewport.width,
+      height: visualViewport.height,
+    },
+    media: Object.fromEntries(
+      [
+        "prefers-reduced-motion: reduce",
+        "forced-colors: active",
+        "prefers-color-scheme: dark",
+      ].map((query) => [query, matchMedia("(" + query + ")").matches]),
+    ),
+  });
   const describe = (element) =>
     element instanceof Element
       ? {
@@ -76,6 +91,7 @@
       ),
       animations: element.getAnimations().map((animation) => ({
         name: animation.animationName || null,
+        transitionProperty: animation.transitionProperty || null,
         playState: animation.playState,
         currentTime: animation.currentTime,
       })),
@@ -85,6 +101,7 @@
     const input = selected?.querySelector('[role="combobox"]');
     return {
       ms: elapsed(),
+      ...viewState(),
       expanded: input?.getAttribute("aria-expanded"),
       disabled:
         input?.disabled || selected?.classList.contains("ant-select-disabled"),
@@ -93,21 +110,9 @@
       popups: [...document.querySelectorAll(selectors)].map(measure),
     };
   };
-  const environment = {
+  const environment = () => ({
     userAgent: navigator.userAgent,
-    viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
-    visualViewport: window.visualViewport && {
-      scale: visualViewport.scale,
-      width: visualViewport.width,
-      height: visualViewport.height,
-    },
-    media: Object.fromEntries(
-      [
-        "prefers-reduced-motion: reduce",
-        "forced-colors: active",
-        "prefers-color-scheme: dark",
-      ].map((query) => [query, matchMedia("(" + query + ")").matches]),
-    ),
+    ...viewState(),
     assets: [
       ...document.querySelectorAll('script[src], link[rel="stylesheet"]'),
     ].map((element) =>
@@ -115,8 +120,13 @@
         .split("/")
         .pop(),
     ),
-  };
-  const report = () => ({ environment, events, snapshots, errors });
+  });
+  const report = () => ({
+    environment: environment(),
+    events,
+    snapshots,
+    errors,
+  });
   const stop = () => {
     if (stopped) return;
     stopped = true;
@@ -158,6 +168,17 @@
     if (
       event instanceof KeyboardEvent &&
       !["Enter", " ", "ArrowDown", "Escape"].includes(event.key)
+    )
+      return;
+    // Focus alone does not open a menu. Wait for the opening interaction so
+    // tabbing through controls cannot consume the two-second capture window.
+    if (
+      !captured &&
+      !["pointerdown", "mousedown", "click"].includes(event.type) &&
+      !(
+        event.type === "keydown" &&
+        ["Enter", " ", "ArrowDown"].includes(event.key)
+      )
     )
       return;
     selected = trigger;

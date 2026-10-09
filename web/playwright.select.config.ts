@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 import config from './playwright.config';
 
 export default defineConfig(config, {
-  testMatch: '**/select.spec.ts',
+  testMatch: ['**/select.spec.ts', '**/motion.spec.ts'],
   outputDir: './test-results-select',
   use: { ...config.use, launchOptions: undefined },
   projects: [

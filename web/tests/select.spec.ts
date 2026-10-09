@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 
-async function selectWithPointer(page: Page, name: string, option: string) {
+async function openWithPointer(page: Page, name: string) {
   const input = page.getByRole('combobox', { name, exact: true });
   const select = page.locator('.ant-select').filter({ has: input });
   await select.scrollIntoViewIfNeeded();
@@ -17,6 +17,12 @@ async function selectWithPointer(page: Page, name: string, option: string) {
   await expect(input).toHaveAttribute('aria-expanded', 'true');
   const popup = page.locator('.ant-select-dropdown:visible');
   await expect(popup).toHaveCount(1);
+  await expect(popup).toBeInViewport();
+  return { input, popup, touch };
+}
+
+async function selectWithPointer(page: Page, name: string, option: string) {
+  const { input, popup, touch } = await openWithPointer(page, name);
   const item = popup.locator('.ant-select-item-option-content').getByText(option, { exact: true });
   await expect(item).toBeInViewport();
   if (touch) await item.tap();
@@ -31,14 +37,23 @@ for (const reducedMotion of ['no-preference', 'reduce'] as const) {
     await page.goto('/');
     await page.getByRole('button', { name: '编辑 ' + backend.overview.servers[0].name }).click();
     await page.getByLabel('出口名称').fill('尚未保存的动画偏好测试');
+    await page.getByRole('tab', { name: 'DNS 解析', exact: true }).click();
+    const { input, popup, touch } = await openWithPointer(page, 'DNS 模式');
     await page.emulateMedia({
       reducedMotion: reducedMotion === 'reduce' ? 'no-preference' : 'reduce',
     });
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByLabel('出口名称')).toHaveValue('尚未保存的动画偏好测试');
-    await page.getByRole('tab', { name: 'DNS 解析', exact: true }).click();
-    await selectWithPointer(page, 'DNS 模式', 'DNS over HTTPS');
+    await expect(input).toHaveAttribute('aria-expanded', 'true');
+    const option = popup.getByText('DNS over HTTPS', { exact: true });
+    await expect(option).toBeInViewport();
+    if (touch) await option.tap();
+    else await option.click();
+    await expect(input).toHaveAttribute('aria-expanded', 'false');
     await expect(page.getByLabel('DoH 端点')).toBeVisible();
+    await page.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeHidden();
+    expect(backend.requests.every(({ method }) => method === 'GET')).toBe(true);
   });
 }
 

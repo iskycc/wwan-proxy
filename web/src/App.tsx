@@ -442,10 +442,13 @@ export default function App() {
         algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
         token: {
           colorPrimary: '#1677ff',
+          colorTextSecondary: dark ? '#a3adbd' : '#667085',
+          colorTextDescription: dark ? '#a3adbd' : '#667085',
+          colorTextHeading: dark ? '#edf2f7' : '#172b4d',
           motion: !reducedMotion,
           borderRadius: 10,
           fontFamily:
-            '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif',
           colorBgLayout: dark ? '#101419' : '#f4f6fa',
         },
         components: {

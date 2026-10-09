@@ -121,6 +121,7 @@ export default function UpdateCard({ servers }: { servers: ServerConfig[] }) {
   const operation = info?.operation;
   return (
     <Card
+      className="update-card"
       title="程序更新"
       extra={
         <Tag color={running ? 'processing' : info?.update_available ? 'orange' : 'default'}>
@@ -144,20 +145,32 @@ export default function UpdateCard({ servers }: { servers: ServerConfig[] }) {
           {
             key: 'version',
             label: '当前版本',
-            children: <Typography.Text code>{info?.current_version || '—'}</Typography.Text>,
+            children: (
+              <Typography.Text className="version-text">
+                {info?.current_version || '—'}
+              </Typography.Text>
+            ),
           },
           {
             key: 'platform',
             label: '运行平台',
             children: info ? info.platform + ' · ' + info.architecture : '—',
           },
-          { key: 'latest', label: '最新版本', children: info?.latest?.version || '尚未检查' },
+          {
+            key: 'latest',
+            label: '最新版本',
+            children: info?.latest ? (
+              <Typography.Text className="version-text">{info.latest.version}</Typography.Text>
+            ) : (
+              '尚未检查'
+            ),
+          },
           ...(info?.latest
             ? [{ key: 'published', label: '发布时间', children: time(info.latest.published_at) }]
             : []),
         ]}
       />
-      <Typography.Paragraph type="secondary">
+      <Typography.Paragraph type="secondary" className="update-agent-status">
         {info?.install_supported
           ? '更新代理运行正常'
           : info?.install_message || '安装更新前需要本机更新代理。'}
