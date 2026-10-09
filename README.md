@@ -16,7 +16,7 @@ Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理�
 - 可为每个实例设置心跳 URL、检查周期和超时，所有请求绑定对应出口网口
 - SQLite 持久化配置、结构化日志、错误和心跳状态
 - 首次访问初始化管理员；代理凭据使用 bcrypt-sha256、管理员密码使用 bcrypt 哈希存储，并提供持久化登录会话
-- Apple-like 响应式 WebUI，针对 1440p、2K、4K 分级缩放，支持深色模式和细腻的加载/状态动画
+- React + TypeScript + Ant Design 响应式 WebUI，支持手机、桌面和大屏布局，以及浅色、深色和跟随系统主题
 - 通过会话认证 WebSocket 实时推送 SOCKS5、HTTP/HTTPS、UDP 会话数与流量，以及 GC live heap、系统内存和 goroutine 指标；断线自动退避重连
 - 配置热应用、实例启停、日志搜索、会话管理和故障原因展示
 - WebUI 管理系统设置、管理员凭据、登录设备和数据库迁移
@@ -24,6 +24,8 @@ Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理�
 - WebUI 通过 `/api/interfaces` 发现本机网口，同时允许手工填写网口名
 
 ## WebUI 预览
+
+以下截图使用演示数据，由当前 Ant Design 界面生成。
 
 首次访问会进入管理员初始化页：
 
@@ -33,13 +35,23 @@ Linux 多出口 SOCKS5、HTTP/HTTPS Proxy 服务与管理面板。每个代理�
 
 ![WWAN Control 浅色模式](docs/webui-overview.png)
 
-深色模式会跟随系统自动切换：
+深色模式支持手动选择，也可以跟随系统自动切换：
 
 ![WWAN Control 深色模式](docs/webui-overview-dark.png)
+
+按功能分组的出口编辑表单：
+
+![WWAN Control 出口编辑](docs/webui-editor.png)
 
 系统、安全与登录会话设置：
 
 ![WWAN Control 设置页面](docs/webui-settings.png)
+
+手机端导航与卡片布局：
+
+![WWAN Control 手机界面](docs/webui-mobile.png)
+
+其他页面预览：[连接配置](docs/webui-configuration.png)、[实时性能](docs/webui-performance.png)、[运行日志](docs/webui-logs.png)、[Vohive 事件](docs/webui-events.png)、[历史统计](docs/webui-statistics.png)、[手机连接列表](docs/webui-mobile-connections.png)、[手机出口编辑](docs/webui-mobile-editor.png)。
 
 ## 编译
 
@@ -50,11 +62,28 @@ go test ./...
 go build -trimpath -ldflags "-s -w" -o wwan-proxy ./cmd/wwan-proxy
 ```
 
+### 前端开发与验证
+
+全部页面、表单、表格、弹窗和导航使用 Ant Design，图表使用 Ant Design Charts。源代码位于 `web/`，构建产物位于 `internal/webui/static/`，随 Go 二进制嵌入发布。仓库保留构建产物，直接执行上面的 Go 编译命令也可运行；部署机器不需要 Node.js 或外部 CDN。
+
+修改前端需要 Node.js 22.12+（推荐 24）：
+
+```bash
+make frontend                  # 安装锁定依赖并构建前端
+make all                       # 构建前端和 Go 二进制
+cd web
+npm run dev                    # 开发服务器，默认代理 API 到 127.0.0.1:9090
+npx playwright install chromium
+npm test                       # 浏览器回归测试
+```
+
+开发服务器可通过环境变量 `WWAN_API_URL` 指定 Go API 地址。完整校验使用 `make check`，包含前端构建、浏览器回归、Go 静态检查、race 测试和脚本检查。更多组件划分与测试说明见 [web/README.md](web/README.md)。
+
 ## 自动构建与 Release
 
 GitHub Actions 会在每次提交到 `main` 后自动执行以下流程：
 
-1. 运行 `go vet ./...` 和 `go test -race ./...`；
+1. 构建 Ant Design 前端并运行 Playwright 浏览器回归，再运行 `go vet ./...` 和 `go test -race ./...`；
 2. 使用 CGO 构建 Linux amd64、Linux arm64，以及不依赖 glibc 的 amd64/arm64 musl 静态版本；
 3. 打包二进制、README、systemd、OpenWrt procd、Alpine OpenRC 和一键安装脚本；
 4. 创建名为 `build-<12 位提交 SHA>` 的正式 Release，并附带 `SHA256SUMS`。

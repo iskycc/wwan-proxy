@@ -94,8 +94,8 @@ func (h *staticAssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if name == "index.html" {
 		w.Header().Set("Cache-Control", "no-cache")
 	} else {
-		// Asset names are stable across releases, so always revalidate instead
-		// of risking an old script being paired with a new index after upgrade.
+		// Revalidate assets, including the stable favicon, against the binary
+		// currently serving this request after an application upgrade.
 		w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
 	}
 	if r.Header.Get("If-None-Match") == asset.etag {

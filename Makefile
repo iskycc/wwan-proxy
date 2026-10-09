@@ -1,17 +1,25 @@
-.PHONY: all test check check-scripts clean
+.PHONY: all wwan-proxy frontend test check check-frontend check-scripts clean
 
 all: wwan-proxy
 
-wwan-proxy:
+wwan-proxy: frontend
 	go build -trimpath -ldflags "-s -w" -o $@ ./cmd/wwan-proxy
+
+frontend:
+	npm ci --prefix web
+	npm run build --prefix web
 
 test:
 	go test ./...
 
-check:
+check: check-frontend
 	go vet ./...
 	go test -race ./...
 	$(MAKE) check-scripts
+
+check-frontend: frontend
+	npm test --prefix web
+	npm run test:integration --prefix web
 
 check-scripts:
 	sh -n scripts/install-alpine.sh

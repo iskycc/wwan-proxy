@@ -1,8 +1,93 @@
+# Go binaries and release packages
 /wwan-proxy
 /socks5-check
+/wwan-proxy.exe
+/socks5-check.exe
 /dist/
+*.test
+*.test.exe
+
+# Runtime databases, SQLite sidecars, and backups
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.db.backup
+*.db.backup.*
+*.db.bak
+*.db.[0-9]*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+.wwan-proxy-migrate-*/
+
+# Runtime logs and process files
 *.log
+*.log.*
+*.pid
+
+# Frontend dependencies and local caches
+node_modules/
+/web/.vite/
+/web/.cache/
+/web/dist/
+*.tsbuildinfo
+
+# Browser test output and coverage
+/web/test-results/
+/web/test-results-*/
+/web/playwright-report/
+/web/blob-report/
+/web/playwright/.cache/
+/web/coverage/
+/coverage/
+/coverage.out
+/coverage.html
+*.prof
+*.pprof
+
+# Documentation screenshots: keep the current README previews only
+/docs/webui-*.png
+!/docs/webui-initialization.png
+!/docs/webui-overview.png
+!/docs/webui-overview-dark.png
+!/docs/webui-editor.png
+!/docs/webui-settings.png
+!/docs/webui-mobile.png
+!/docs/webui-configuration.png
+!/docs/webui-performance.png
+!/docs/webui-logs.png
+!/docs/webui-events.png
+!/docs/webui-statistics.png
+!/docs/webui-mobile-connections.png
+!/docs/webui-mobile-editor.png
+
+# Local environment settings; keep reusable templates
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.*.sample
+!.env.template
+!.env.*.template
+
+# Editor, operating system, and temporary files
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
 .DS_Store
+Thumbs.db
+Desktop.ini
+
+# internal/webui/static/ is embedded in Go builds and must be committed.
+# Keep frontend source, lockfiles, and README-linked screenshots tracked.

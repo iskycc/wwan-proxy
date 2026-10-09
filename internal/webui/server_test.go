@@ -44,11 +44,11 @@ func TestWebUIAndConfigurationAPI(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if !bytes.Contains(body, []byte("连接，一目了然")) {
+	if !bytes.Contains(body, []byte("网络控制中心")) {
 		t.Fatal("WebUI index was not served")
 	}
-	if !bytes.Contains(body, []byte(`<body class="auth-pending">`)) || !bytes.Contains(body, []byte(`id="boot-screen"`)) {
-		t.Fatal("WebUI does not hide login and dashboard content while authentication is pending")
+	if !bytes.Contains(body, []byte(`id="root"`)) {
+		t.Fatal("WebUI application root was not served")
 	}
 	resp, err = client.Get(ts.URL + "/api/overview")
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {

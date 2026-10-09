@@ -19,18 +19,19 @@ func TestStaticAssetHandlerCompressionCachingAndFallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	scriptPath := frontendScriptPath(t)
+	request := httptest.NewRequest(http.MethodGet, scriptPath, nil)
 	request.Header.Set("Accept-Encoding", "gzip, deflate")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("Content-Encoding") != "gzip" {
 		t.Fatalf("compressed response status=%d headers=%v", response.Code, response.Header())
 	}
-	original, err := fs.ReadFile(root, "app.js")
+	original, err := fs.ReadFile(root, scriptPath[1:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	uncompressedRequest := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	uncompressedRequest := httptest.NewRequest(http.MethodGet, scriptPath, nil)
 	uncompressedRequest.Header.Set("Accept-Encoding", "br, gzip;q=0.0")
 	uncompressedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(uncompressedResponse, uncompressedRequest)
@@ -53,7 +54,7 @@ func TestStaticAssetHandlerCompressionCachingAndFallbacks(t *testing.T) {
 		t.Fatalf("compressed asset mismatch: err=%v decoded=%d original=%d", err, len(decoded), len(original))
 	}
 
-	cachedRequest := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	cachedRequest := httptest.NewRequest(http.MethodGet, scriptPath, nil)
 	cachedRequest.Header.Set("If-None-Match", response.Header().Get("ETag"))
 	cachedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(cachedResponse, cachedRequest)
